@@ -1,0 +1,46 @@
+{
+  "config_root": "proof/evidence-sample/config",
+  "disclaimer": "Rankings reflect 70 observed tool actions across 2 active rules. Rules below the support floor (min_support=30) are low-confidence; they appear as 'insufficient_evidence'. A rule with zero observed violations is NOT a deletion recommendation \u2014 it may be obeyed, enforced by other means, or simply never triggered (the omniscient-auditor trap). Only 'enforce_candidate' rules, which have both sufficient support AND observed violations, are genuine convert-to-hook candidates. Always review recommendations before acting.",
+  "ranked": [
+    {
+      "confidence": "medium",
+      "convert_kind": "never_command",
+      "excluded_by_exception": 2,
+      "meets_support_floor": true,
+      "opportunity_count": 35,
+      "predicate": {
+        "decision": "deny",
+        "match": "git commit",
+        "tool": "Bash"
+      },
+      "recommendation": "enforce_candidate",
+      "rule_excerpt": "MANDATORY: Never use raw git commit directly \u2014 always route through the commit agent. Escape hatch \u2026",
+      "rule_id": "e416dad0ebe8",
+      "source_rel": "CLAUDE.md",
+      "violation_count": 5,
+      "violation_rate": 0.14285714285714285
+    },
+    {
+      "confidence": "medium",
+      "convert_kind": "never_command",
+      "excluded_by_exception": 0,
+      "meets_support_floor": true,
+      "opportunity_count": 35,
+      "predicate": {
+        "decision": "deny",
+        "match": "git push",
+        "tool": "Bash"
+      },
+      "recommendation": "enforce_candidate",
+      "rule_excerpt": "MANDATORY: Never dispatch git push to remote directly.",
+      "rule_id": "8fb701ad4c67",
+      "source_rel": "CLAUDE.md",
+      "violation_count": 3,
+      "violation_rate": 0.08571428571428572
+    }
+  ],
+  "thresholds": {
+    "min_support": 30,
+    "min_violations": 1
+  }
+}

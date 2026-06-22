@@ -21,6 +21,7 @@ All output (both ``--json`` and text) is free of machine-specific paths:
 - Paths under *config_root* are made relative to config_root.
 - Paths under ``$HOME`` but not under config_root are home-collapsed (``~/``).
 - ``config_root`` is echoed as the user supplied it (relative inputs stay relative).
+- Bash command excerpts in evidence output are sanitized (``/Users/<n>/`` → ``~/``).
 Sanitization is applied at the output boundary in this module; ``audit.py`` and
 ``parse.py`` internals are unchanged.
 """
@@ -30,11 +31,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from misfire import __version__
+from misfire.adapters.transcript import iter_tool_actions
 from misfire.audit import (
     Finding,
     KIND_CONFLICT,
@@ -46,13 +49,21 @@ from misfire.audit import (
 from misfire.classify import (
     CATEGORY_CONVERTIBLE,
     Classification,
+    CONVERT_NEVER_COMMAND,
     classify_rules,
 )
+from misfire.evidence import ToolAction
+from misfire.match import find_violations, RuleViolation
 from misfire.parse import ParseResult, Rule, SourceFile, _collapse_home, parse_config
+from misfire.rank import (
+    rank_rules,
+    RankReport,
+    RankedRule,
+)
 
 
 # ---------------------------------------------------------------------------
-# Stubs for Phase 2/3 commands
+# Stub for Phase 3 command
 # ---------------------------------------------------------------------------
 
 
@@ -60,14 +71,6 @@ def _stub(cmd: str, phase: int) -> int:
     """Print a not-yet-implemented notice to stderr and return exit code 2."""
     print(f"{cmd}: not yet implemented (Phase {phase})", file=sys.stderr)
     return 2
-
-
-def _cmd_rank(_args: argparse.Namespace) -> int:
-    return _stub("rank", 2)
-
-
-def _cmd_evidence(_args: argparse.Namespace) -> int:
-    return _stub("evidence", 2)
 
 
 def _cmd_convert(_args: argparse.Namespace) -> int:
@@ -184,6 +187,151 @@ def _sanitize_finding(f: Finding, config_root: Path) -> Finding:
 
 
 # ---------------------------------------------------------------------------
+# Command sanitization (evidence output — strip /Users/<n>/ from commands)
+# ---------------------------------------------------------------------------
+
+# Matches /Users/<name>/ or /home/<name>/ (for portability to Linux CI runners)
+_ABS_HOME_PATH_RE = re.compile(r"/(Users|home)/[^/\s]+/")
+
+
+def _sanitize_command_str(cmd: str) -> str:
+    """Collapse ``/Users/<name>/`` or ``/home/<name>/`` → ``~/`` in a command string.
+
+    Applied to all Bash command excerpts in ``evidence`` output so that real
+    transcripts containing absolute paths never leak a username.
+    """
+    return _ABS_HOME_PATH_RE.sub("~/", cmd)
+
+
+# ---------------------------------------------------------------------------
+# Escape-hatch extraction (auto-detect sanctioned exception markers)
+# ---------------------------------------------------------------------------
+
+# Matches an escape-hatch/exception keyword followed (within 150 chars) by a
+# backtick-wrapped literal span.  The literal span may contain spaces
+# (e.g. "`CAST_COMMIT_AGENT=1 git commit`") — [^`]+ allows any char except
+# the closing backtick.
+#
+# Trigger keywords: "escape hatch", "escape-hatch", "exception", "unless"
+# (case-insensitive).  Only extracts when BOTH a trigger keyword AND a
+# following backtick-wrapped literal are clearly present; otherwise → nothing.
+_ESCAPE_HATCH_RE = re.compile(
+    r"(?:escape[\s\-]+hatch|exception|unless).{0,150}?`([^`]+)`",
+    re.IGNORECASE,
+)
+
+# Matches an env-var assignment token of the form VAR=VALUE where VALUE is
+# non-whitespace.  Used by _refine_exception_marker to extract the distinctive
+# part of a backtick span (e.g. "CAST_COMMIT_AGENT=1 git commit" →
+# "CAST_COMMIT_AGENT=1") so that substring checks match export/env/&&/multi-var
+# real-world command variants.
+_ENV_VAR_TOKEN_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*=\S+)")
+
+
+def _refine_exception_marker(span: str, predicate_match: str) -> str:
+    """Reduce a full backtick span to its most distinctive substring marker.
+
+    Priority:
+    1. If span contains an env-var assignment token (``VAR=VALUE``), return
+       that token alone.  A substring check on ``CAST_COMMIT_AGENT=1`` then
+       matches ``export CAST_COMMIT_AGENT=1 && git commit``,
+       ``env CAST_COMMIT_AGENT=1 OTHER=1 git commit``, etc.
+    2. If span ends with the predicate's forbidden command (e.g. ``git commit``),
+       strip it.  The remaining prefix is the distinctive part.
+    3. Return the full span unchanged.
+
+    Args:
+        span:             The content of the backtick-quoted literal from the
+                          escape-hatch clause.
+        predicate_match:  The ``predicate["match"]`` string for the rule (the
+                          forbidden command, e.g. ``"git commit"``).
+
+    Returns:
+        The most distinctive substring marker for use in ``find_violations``.
+    """
+    # 1. Env-var token
+    env_m = _ENV_VAR_TOKEN_RE.search(span)
+    if env_m:
+        return env_m.group(1)
+
+    # 2. Strip trailing forbidden command
+    stripped = span.strip()
+    if predicate_match:
+        suffix = " " + predicate_match
+        if stripped.endswith(suffix):
+            refined = stripped[: -len(suffix)].strip()
+            if refined:
+                return refined
+
+    # 3. Full span
+    return span
+
+
+def _extract_exceptions(
+    classifications: List[Classification],
+    rules_by_id: Dict[str, Rule],
+) -> Dict[str, str]:
+    """Extract escape-hatch exception markers from never_command rule raw texts.
+
+    Scans the ``raw_text`` (backtick-aware) of each ``never_command``
+    convertible rule for a clearly-stated escape hatch that names a literal
+    marker in backticks.  The extracted marker is refined to its most
+    distinctive token (FIX A: env-var token preferred over the full span so
+    that ``export VAR=1 && git commit`` variants are also caught).
+
+    After extraction, propagates each exception to ALL ``never_command`` rules
+    that share the same ``predicate["match"]`` — so a hatch stated once for
+    ``"git commit"`` covers every rule that forbids ``git commit``, regardless
+    of whether each individual rule's text restates it (FIX B).  Only
+    exceptions actually extracted from some rule's text are propagated; none
+    are invented.
+
+    Returns a dict of ``{rule_id: exception_marker}`` for use with
+    ``find_violations``.
+    """
+    # Step 1 — collect per-rule exceptions from rules that explicitly state a hatch,
+    # and map rule_id → predicate_match for all active never_command rules.
+    raw_exceptions: Dict[str, str] = {}   # rule_id → refined marker (hatch-stating rules only)
+    predicate_match_for: Dict[str, str] = {}  # rule_id → predicate["match"]
+
+    for cl in classifications:
+        if cl.category != CATEGORY_CONVERTIBLE or cl.convert_kind != CONVERT_NEVER_COMMAND:
+            continue
+        if cl.predicate is None:
+            continue
+        pred_match = cl.predicate.get("match", "")
+        predicate_match_for[cl.rule_id] = pred_match
+
+        rule = rules_by_id.get(cl.rule_id)
+        if rule is None:
+            continue
+        m = _ESCAPE_HATCH_RE.search(rule.raw_text)
+        if m:
+            span = m.group(1).strip()
+            if span:
+                raw_exceptions[cl.rule_id] = _refine_exception_marker(span, pred_match)
+
+    if not raw_exceptions:
+        return {}
+
+    # Step 2 — build predicate_match → exception_marker from rules that stated a hatch.
+    match_to_marker: Dict[str, str] = {}
+    for rule_id, marker in raw_exceptions.items():
+        pred_match = predicate_match_for.get(rule_id, "")
+        if pred_match:
+            match_to_marker[pred_match] = marker
+
+    # Step 3 — propagate: every active never_command rule whose predicate["match"]
+    # has a known exception gets that exception (FIX B).
+    exceptions: Dict[str, str] = {}
+    for rule_id, pred_match in predicate_match_for.items():
+        if pred_match in match_to_marker:
+            exceptions[rule_id] = match_to_marker[pred_match]
+
+    return exceptions
+
+
+# ---------------------------------------------------------------------------
 # Serialization helpers
 # ---------------------------------------------------------------------------
 
@@ -246,6 +394,36 @@ def _convertible_entry(rule: Rule, cl: Classification) -> Dict:
     }
 
 
+def _ranked_rule_to_dict(rr: RankedRule) -> Dict:
+    """Serialize a RankedRule to a JSON-safe dict (all paths already sanitized)."""
+    return {
+        "confidence": rr.confidence,
+        "convert_kind": rr.convert_kind,
+        "excluded_by_exception": rr.excluded_by_exception,
+        "meets_support_floor": rr.meets_support_floor,
+        "opportunity_count": rr.opportunity_count,
+        "predicate": rr.predicate,
+        "recommendation": rr.recommendation,
+        "rule_excerpt": rr.rule_excerpt,
+        "rule_id": rr.rule_id,
+        "source_rel": rr.source_rel,
+        "violation_count": rr.violation_count,
+        "violation_rate": rr.violation_rate,
+    }
+
+
+def _violation_to_dict(action: ToolAction) -> Dict:
+    """Serialize a ToolAction violation to a JSON-safe dict with command sanitized."""
+    return {
+        "agent_type": action.agent_type,
+        "command": _sanitize_command_str(action.command),
+        "is_sidechain": action.is_sidechain,
+        "session_id": action.session_id,
+        "timestamp": action.timestamp,
+        "transcript_rel": action.transcript_rel,
+    }
+
+
 # ---------------------------------------------------------------------------
 # audit — text output
 # ---------------------------------------------------------------------------
@@ -257,6 +435,13 @@ _ALL_CATEGORIES = [
     "non_directive",
     "output_shape",
     "safety_keep",
+]
+
+# Recommendation buckets in display order (same as _RECOMMENDATION_TIER in rank.py)
+_RANK_GROUPS = [
+    "enforce_candidate",
+    "insufficient_evidence",
+    "observed_no_violations",
 ]
 
 
@@ -386,6 +571,296 @@ def _build_audit_json(
 
 
 # ---------------------------------------------------------------------------
+# rank — text output
+# ---------------------------------------------------------------------------
+
+
+def _print_rank_text(
+    report: RankReport,
+    config_root_display: str,
+    projects_dir_display: str,
+) -> None:
+    """Print the human-readable rank report to stdout."""
+    n_active = len(report.ranked)
+    print(f"misfire rank — {config_root_display}")
+    print(f"Projects dir: {projects_dir_display}")
+    print(f"Active rules: {n_active}")
+    print()
+    print(
+        f"Thresholds: min_support={report.thresholds['min_support']}  "
+        f"min_violations={report.thresholds['min_violations']}"
+    )
+    print()
+
+    groups: Dict[str, List[RankedRule]] = {g: [] for g in _RANK_GROUPS}
+    for rr in report.ranked:
+        groups.setdefault(rr.recommendation, []).append(rr)
+
+    for group_key in _RANK_GROUPS:
+        grp = groups.get(group_key, [])
+        print(f"=== {group_key} ({len(grp)}) ===")
+        if not grp:
+            print("  (none)")
+        else:
+            for i, rr in enumerate(grp, 1):
+                rate_pct = f"{rr.violation_rate * 100:.1f}%"
+                excl_note = (
+                    f"  excluded (sanctioned): {rr.excluded_by_exception}"
+                    if rr.excluded_by_exception
+                    else ""
+                )
+                print(
+                    f"\n  {i}. {rr.source_rel}  [{rr.convert_kind}]  "
+                    f"confidence={rr.confidence}"
+                )
+                print(f"     rule_id: {rr.rule_id}")
+                print(
+                    f"     violations: {rr.violation_count}  "
+                    f"opportunities: {rr.opportunity_count}  "
+                    f"rate: {rate_pct}{excl_note}"
+                )
+                print(f"     \"{rr.rule_excerpt}\"")
+        print()
+
+    print("---")
+    print(report.disclaimer)
+
+
+# ---------------------------------------------------------------------------
+# rank — JSON output
+# ---------------------------------------------------------------------------
+
+
+def _build_rank_json(report: RankReport, config_root_raw: str) -> str:
+    """Build deterministic JSON for the rank command.
+
+    Uses ``sort_keys=True, indent=2`` for byte-stable output across machines.
+    The ``ranked`` list is already in canonical order from ``rank_rules``.
+    """
+    output = {
+        "config_root": config_root_raw,
+        "disclaimer": report.disclaimer,
+        "ranked": [_ranked_rule_to_dict(rr) for rr in report.ranked],
+        "thresholds": report.thresholds,
+    }
+    return json.dumps(output, indent=2, sort_keys=True)
+
+
+# ---------------------------------------------------------------------------
+# rank command dispatcher
+# ---------------------------------------------------------------------------
+
+
+def _cmd_rank(args: argparse.Namespace) -> int:
+    """Implement ``misfire rank``.
+
+    Pipeline: parse_config → classify_rules → extract_exceptions →
+    iter_tool_actions → find_violations → rank_rules → print.
+
+    Observer posture: always exits 0.  All output is PII-free (sanitized at
+    the output boundary — no ``/Users/<name>/`` leakage).
+    """
+    config_root_raw: str = args.config_root if args.config_root is not None else "~/.claude"
+    config_root: Path = (
+        Path(args.config_root).expanduser().resolve()
+        if args.config_root is not None
+        else Path.home() / ".claude"
+    )
+
+    projects_dir: Path = (
+        Path(args.projects_dir).expanduser().resolve()
+        if args.projects_dir
+        else Path.home() / ".claude" / "projects"
+    )
+
+    min_support: int = args.min_support
+    min_violations: int = args.min_violations
+
+    config_root_display = _display_config_root(config_root_raw)
+    projects_dir_display = _collapse_home(projects_dir)
+
+    parse_result = parse_config(config_root)
+    rules = parse_result.rules
+    classifications = classify_rules(rules)
+    rules_by_id: Dict[str, Rule] = {r.rule_id: r for r in rules}
+
+    exceptions = _extract_exceptions(classifications, rules_by_id)
+
+    actions = iter_tool_actions(projects_dir)
+    rule_violations = find_violations(classifications, actions, exceptions=exceptions)
+
+    report = rank_rules(
+        rule_violations,
+        rules_by_id,
+        min_support=min_support,
+        min_violations=min_violations,
+    )
+
+    if args.json:
+        print(_build_rank_json(report, config_root_raw))
+    else:
+        _print_rank_text(report, config_root_display, projects_dir_display)
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# evidence — text output
+# ---------------------------------------------------------------------------
+
+
+def _print_evidence_text(
+    rr: RankedRule,
+    violations: List[ToolAction],
+    rv: RuleViolation,
+    config_root_display: str,
+    limit: int,
+) -> None:
+    """Print the human-readable evidence drill-down for a single rule."""
+    print(f"misfire evidence — {config_root_display}")
+    print(f"Rule: {rr.rule_id}  [{rr.convert_kind}]  confidence={rr.confidence}")
+    print(f"\"{rr.rule_excerpt}\"")
+    rate_pct = f"{rr.violation_rate * 100:.1f}%"
+    print(
+        f"Violations: {rr.violation_count}  Opportunities: {rr.opportunity_count}  "
+        f"Rate: {rate_pct}  Excluded (sanctioned): {rr.excluded_by_exception}"
+    )
+    print()
+
+    total = rr.violation_count
+    showing = len(violations)
+    print(
+        f"--- {total} violating action{'s' if total != 1 else ''} "
+        f"(showing {showing} of {total}) ---"
+    )
+    print()
+
+    for action in violations:
+        cmd = _sanitize_command_str(action.command)
+        sidechain_str = "sidechain" if action.is_sidechain else "main"
+        agent_str = action.agent_type or "main-session"
+        print(f"  {action.timestamp}  {cmd[:120]}")
+        print(f"  transcript: {action.transcript_rel}  [{sidechain_str}]  agent: {agent_str}")
+        print()
+
+
+# ---------------------------------------------------------------------------
+# evidence — JSON output
+# ---------------------------------------------------------------------------
+
+
+def _build_evidence_json(
+    rr: RankedRule,
+    violations: List[ToolAction],
+    config_root_raw: str,
+    limit: int,
+) -> str:
+    """Build deterministic JSON for the evidence command."""
+    output = {
+        "config_root": config_root_raw,
+        "limit": limit,
+        "rule": _ranked_rule_to_dict(rr),
+        "violations": [_violation_to_dict(a) for a in violations],
+    }
+    return json.dumps(output, indent=2, sort_keys=True)
+
+
+# ---------------------------------------------------------------------------
+# evidence command dispatcher
+# ---------------------------------------------------------------------------
+
+
+def _cmd_evidence(args: argparse.Namespace) -> int:
+    """Implement ``misfire evidence``.
+
+    Drills down into the evidence for one rule (``--rule RULE_ID``) or the
+    top-ranked rule when no rule is specified.
+
+    Observer posture: exits 0 on success.  All command excerpts in output are
+    sanitized (``/Users/<name>/`` → ``~/``).
+    """
+    config_root_raw: str = args.config_root if args.config_root is not None else "~/.claude"
+    config_root: Path = (
+        Path(args.config_root).expanduser().resolve()
+        if args.config_root is not None
+        else Path.home() / ".claude"
+    )
+
+    projects_dir: Path = (
+        Path(args.projects_dir).expanduser().resolve()
+        if args.projects_dir
+        else Path.home() / ".claude" / "projects"
+    )
+
+    limit: int = args.limit
+    rule_id_filter: Optional[str] = args.rule
+
+    config_root_display = _display_config_root(config_root_raw)
+
+    parse_result = parse_config(config_root)
+    rules = parse_result.rules
+    classifications = classify_rules(rules)
+    rules_by_id: Dict[str, Rule] = {r.rule_id: r for r in rules}
+
+    exceptions = _extract_exceptions(classifications, rules_by_id)
+
+    actions = iter_tool_actions(projects_dir)
+    rule_violations = find_violations(classifications, actions, exceptions=exceptions)
+
+    if not rule_violations:
+        print("No active convertible rules found.", file=sys.stderr)
+        return 0
+
+    report = rank_rules(rule_violations, rules_by_id)
+    violations_by_rule_id: Dict[str, RuleViolation] = {
+        rv.rule_id: rv for rv in rule_violations
+    }
+
+    # Resolve the target rule
+    target_rr: Optional[RankedRule] = None
+    target_rv: Optional[RuleViolation] = None
+
+    if rule_id_filter:
+        # Prefix match on rule_id
+        for rv in rule_violations:
+            if rv.rule_id.startswith(rule_id_filter):
+                target_rv = rv
+                target_rr = next(
+                    (rr for rr in report.ranked if rr.rule_id == rv.rule_id), None
+                )
+                break
+        if target_rv is None:
+            print(
+                f"evidence: no rule found with id prefix {rule_id_filter!r}",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        # Top-ranked rule
+        if not report.ranked:
+            print("No ranked rules found.", file=sys.stderr)
+            return 0
+        target_rr = report.ranked[0]
+        target_rv = violations_by_rule_id.get(target_rr.rule_id)
+
+    if target_rv is None or target_rr is None:
+        print("evidence: could not resolve target rule", file=sys.stderr)
+        return 1
+
+    # Cap at limit
+    capped_violations = target_rv.violations[:limit]
+
+    if args.json:
+        print(_build_evidence_json(target_rr, capped_violations, config_root_raw, limit))
+    else:
+        _print_evidence_text(
+            target_rr, capped_violations, target_rv, config_root_display, limit
+        )
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # audit command dispatcher
 # ---------------------------------------------------------------------------
 
@@ -503,22 +978,93 @@ def build_parser() -> argparse.ArgumentParser:
         help="output deterministic JSON (byte-stable; sort_keys=True)",
     )
 
-    # --- rank (Phase 2 stub) ---
-    subparsers.add_parser(
+    # --- rank (Phase 2) ---
+    rank_parser = subparsers.add_parser(
         "rank",
         help=(
             "[Phase 2] Evidence-ranked list of prose rules your agents "
             "demonstrably ignore, from your run history"
         ),
     )
+    rank_parser.add_argument(
+        "config_root",
+        nargs="?",
+        default=None,
+        metavar="CONFIG_ROOT",
+        help="config root directory (default: ~/.claude)",
+    )
+    rank_parser.add_argument(
+        "--projects-dir",
+        dest="projects_dir",
+        metavar="DIR",
+        default=None,
+        help="Claude Code projects directory (default: ~/.claude/projects)",
+    )
+    rank_parser.add_argument(
+        "--min-support",
+        dest="min_support",
+        type=int,
+        default=30,
+        metavar="N",
+        help="minimum opportunity count for trusted ranking (default: 30)",
+    )
+    rank_parser.add_argument(
+        "--min-violations",
+        dest="min_violations",
+        type=int,
+        default=1,
+        metavar="N",
+        help="minimum violation count to recommend enforcement (default: 1)",
+    )
+    rank_parser.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="output deterministic JSON (byte-stable; sort_keys=True)",
+    )
 
-    # --- evidence (Phase 2 stub) ---
-    subparsers.add_parser(
+    # --- evidence (Phase 2) ---
+    evidence_parser = subparsers.add_parser(
         "evidence",
         help=(
             "[Phase 2] Show raw per-rule evidence: violation + support counts "
             "and raw excerpts"
         ),
+    )
+    evidence_parser.add_argument(
+        "config_root",
+        nargs="?",
+        default=None,
+        metavar="CONFIG_ROOT",
+        help="config root directory (default: ~/.claude)",
+    )
+    evidence_parser.add_argument(
+        "--rule",
+        dest="rule",
+        metavar="RULE_ID",
+        default=None,
+        help="rule_id prefix to drill into (default: top-ranked rule)",
+    )
+    evidence_parser.add_argument(
+        "--projects-dir",
+        dest="projects_dir",
+        metavar="DIR",
+        default=None,
+        help="Claude Code projects directory (default: ~/.claude/projects)",
+    )
+    evidence_parser.add_argument(
+        "--limit",
+        dest="limit",
+        type=int,
+        default=20,
+        metavar="N",
+        help="maximum violating actions to show (default: 20)",
+    )
+    evidence_parser.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="output deterministic JSON (byte-stable; sort_keys=True)",
     )
 
     # --- convert (Phase 3 stub) ---
