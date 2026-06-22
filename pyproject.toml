@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "misfire"
+version = "0.0.0"
+description = "Trace-grounded CLAUDE.md adherence auditor: which prose rules your agents actually ignore, ranked from run history"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.9"
+dependencies = []
+
+# The deterministic core requires NOTHING beyond the stdlib.
+# Optional extras are reserved for future phases (LLM ablation, OTel, etc.).
+[project.optional-dependencies]
+llm = []    # Phase 4: local-Ollama ablation (opt-in causal probe)
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+misfire = "misfire.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/misfire"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
