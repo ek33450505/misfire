@@ -456,15 +456,24 @@ class TestImperativeDetection:
 
 class TestHomePathCollapse:
     def test_home_path_collapsed(self) -> None:
-        """Paths under home dir are collapsed to ~/..."""
+        """A file directly under config_root returns its config-root-relative path.
+
+        Priority 2 of _compute_source_rel: when path is under config_root, return
+        the bare relative path (e.g. 'CLAUDE.md') with NO hardcoded prefix.
+        This is the corrected behaviour — the old code wrongly prepended '~/.claude/'.
+        """
         home = Path.home()
         fake_config = home / ".claude"
         fake_file = fake_config / "CLAUDE.md"
         result = _compute_source_rel(fake_file, fake_config, None)
-        assert not result.startswith(str(home)), (
-            f"source_rel must not expose {home}: got {result!r}"
+        # Config-root-relative path, not an absolute or home-prefixed one.
+        assert result == "CLAUDE.md", (
+            f"Expected 'CLAUDE.md' (config-root-relative), got {result!r}"
         )
-        assert "~/" in result or result.startswith("~")
+        # Primary privacy guarantee: no raw /Users/<name>/ exposed.
+        assert "/Users/" not in result, (
+            f"source_rel must not leak /Users/: got {result!r}"
+        )
 
     def test_no_username_leaked(self) -> None:
         """source_rel never contains /Users/<name>/ (macOS home pattern)."""
@@ -497,7 +506,13 @@ class TestHomePathCollapse:
         assert result == str(Path(".claude") / "rules" / "test.md")
 
     def test_rules_in_source_appear_with_rules_in_source_rel(self, tmp_path: Path) -> None:
-        """Rules from config_root/rules/*.md have source_rel starting with ~/.claude/."""
+        """Rules from config_root/rules/*.md have a config-root-relative source_rel.
+
+        After the _compute_source_rel fix: the path is relative to config_root with
+        NO hardcoded prefix — e.g. 'rules/my.md', not '~/.claude/rules/my.md'.
+        This is the regression guard for the portability bug where any non-~/.claude
+        config_root produced a wrong '~/.claude/' prefix.
+        """
         config_root = tmp_path / "config"
         (config_root / "rules").mkdir(parents=True)
         rf = config_root / "rules" / "my.md"
@@ -508,8 +523,35 @@ class TestHomePathCollapse:
             (r for r in result.rules if "my rule" in r.normalized_text), None
         )
         assert rule_from_rf is not None
-        assert "~/.claude/" in rule_from_rf.source_rel, (
-            f"Expected ~/.claude/ prefix in source_rel, got {rule_from_rf.source_rel!r}"
+        # Source rel must be the bare config-root-relative path.
+        assert rule_from_rf.source_rel == "rules/my.md", (
+            f"Expected 'rules/my.md' (config-root-relative), got {rule_from_rf.source_rel!r}"
+        )
+        # Regression guard: must NOT carry the old hardcoded ~/.claude/ prefix.
+        assert not rule_from_rf.source_rel.startswith("~/.claude/"), (
+            f"source_rel must not have hardcoded ~/.claude/ prefix: {rule_from_rf.source_rel!r}"
+        )
+
+    def test_non_home_config_root_reports_real_relative_path(self, tmp_path: Path) -> None:
+        """Regression guard: a non-~/.claude config_root returns the actual relative path.
+
+        The bug: _compute_source_rel always prepended '~/.claude/' regardless of
+        where config_root actually lived, so a file at proof/sample-config/CLAUDE.md
+        was reported as '~/.claude/CLAUDE.md' — wrong path, wrong prefix.
+
+        After the fix, the config-root-relative path is returned as-is: 'CLAUDE.md'.
+        """
+        config_root = tmp_path / "my-config"
+        config_root.mkdir()
+        fake_file = config_root / "CLAUDE.md"
+        fake_file.touch()
+
+        result = _compute_source_rel(fake_file, config_root, None)
+        assert result == "CLAUDE.md", (
+            f"Expected 'CLAUDE.md' for a non-home config_root, got {result!r}"
+        )
+        assert not result.startswith("~/.claude/"), (
+            f"source_rel must not have hardcoded ~/.claude/ prefix: {result!r}"
         )
 
 

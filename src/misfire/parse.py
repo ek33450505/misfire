@@ -130,7 +130,10 @@ def _compute_source_rel(
 
     Priority:
     1. project-relative (if ``path`` is under ``project_dir``)
-    2. config-root-relative, prefixed with ``~/.claude/``
+    2. config-root-relative (if ``path`` is under ``config_root``) — returned as a
+       bare relative path, e.g. ``CLAUDE.md``, ``rules/tools.md``.  No hardcoded
+       prefix is added so that callers supplying a non-``~/.claude`` config_root
+       (test fixtures, ``proof/sample-config``, etc.) get accurate paths.
     3. home-collapsed (``~/...``)
     4. absolute path (only when outside home — acceptable in test fixtures)
 
@@ -146,7 +149,7 @@ def _compute_source_rel(
 
     try:
         rel = resolved.relative_to(config_root.resolve())
-        return "~/.claude/" + str(rel)
+        return str(rel)
     except ValueError:
         pass
 
