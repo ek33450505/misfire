@@ -1,0 +1,243 @@
+{
+  "classification_counts": {
+    "convertible": 3,
+    "judgment_keep": 3,
+    "non_directive": 1,
+    "output_shape": 1,
+    "safety_keep": 1
+  },
+  "config_root": "proof/sample-config",
+  "convertible": [
+    {
+      "confidence": "high",
+      "convert_kind": "never_command",
+      "line_start": 5,
+      "normalized_text": "Never use raw git commit directly \u2014 always route through the commit agent.",
+      "predicate": {
+        "decision": "deny",
+        "match": "git commit",
+        "tool": "Bash"
+      },
+      "rule_id": "d8fa990b1728",
+      "source_rel": "CLAUDE.md"
+    },
+    {
+      "confidence": "high",
+      "convert_kind": "tool_substitution",
+      "line_start": 15,
+      "normalized_text": "Use misfire not cat for reading configuration files.",
+      "predicate": {
+        "forbidden": "cat",
+        "prefer": "misfire",
+        "tool": "Bash"
+      },
+      "rule_id": "07b6c811dff7",
+      "source_rel": "CLAUDE.md"
+    },
+    {
+      "confidence": "high",
+      "convert_kind": "tool_substitution",
+      "line_start": 3,
+      "normalized_text": "Use bat not cat for viewing files in the terminal.",
+      "predicate": {
+        "forbidden": "cat",
+        "prefer": "bat",
+        "tool": "Bash"
+      },
+      "rule_id": "2e4076564238",
+      "source_rel": "rules/tools.md"
+    }
+  ],
+  "findings": [
+    {
+      "detail": {
+        "approx_total_tokens": 633,
+        "source_file_count": 3,
+        "token_heuristic": "chars/4",
+        "total_chars": 2533,
+        "total_lines": 228
+      },
+      "kind": "token_rent",
+      "line": null,
+      "message": "Total config: 228 lines / ~633 tokens (heuristic: chars/4) across 3 source file(s).",
+      "severity": "info",
+      "source_rel": "(aggregate)"
+    },
+    {
+      "detail": {
+        "resolved": "~/nonexistent-misfire-fixture/logs",
+        "rule_id": "a6d7df2d8d8b",
+        "token": "~/nonexistent-misfire-fixture/logs"
+      },
+      "kind": "stale_path",
+      "line": 13,
+      "message": "Path does not exist: '~/nonexistent-misfire-fixture/logs'",
+      "severity": "warn",
+      "source_rel": "CLAUDE.md"
+    },
+    {
+      "detail": {
+        "key": [
+          "bash",
+          "cat"
+        ],
+        "rule_a": {
+          "line": 15,
+          "prefer": "misfire",
+          "source_rel": "CLAUDE.md"
+        },
+        "rule_b": {
+          "line": 3,
+          "prefer": "bat",
+          "source_rel": "rules/tools.md"
+        }
+      },
+      "kind": "conflict",
+      "line": 15,
+      "message": "Conflicting tool-substitution rules for 'cat': CLAUDE.md:15 prefers 'misfire' but rules/tools.md:3 prefers 'bat'.",
+      "severity": "warn",
+      "source_rel": "CLAUDE.md"
+    },
+    {
+      "detail": {
+        "imported_from": "CLAUDE.md",
+        "missing_path": "nonexistent-import.md"
+      },
+      "kind": "load_fidelity",
+      "line": null,
+      "message": "Broken @import: 'nonexistent-import.md' does not exist (imported from 'CLAUDE.md').",
+      "severity": "warn",
+      "source_rel": "nonexistent-import.md"
+    },
+    {
+      "detail": {
+        "approx_tokens": 479,
+        "line_count": 208,
+        "threshold": 200
+      },
+      "kind": "token_rent",
+      "line": null,
+      "message": "'rules/verbose.md' is 208 lines (threshold: 200). Per /memory guidance, files >200 lines reduce adherence.",
+      "severity": "warn",
+      "source_rel": "rules/verbose.md"
+    }
+  ],
+  "rules": [
+    {
+      "imperative": false,
+      "line_end": 3,
+      "line_start": 3,
+      "normalized_text": "Not real config. Authored to exercise misfire audit finding kinds.",
+      "precedence_tier": "user",
+      "rule_id": "721934796205",
+      "section": "CAST Agent Configuration (Proof Fixture)",
+      "source_rel": "CLAUDE.md"
+    },
+    {
+      "imperative": true,
+      "line_end": 5,
+      "line_start": 5,
+      "normalized_text": "Never use raw git commit directly \u2014 always route through the commit agent.",
+      "precedence_tier": "user",
+      "rule_id": "d8fa990b1728",
+      "section": "CAST Agent Configuration (Proof Fixture)",
+      "source_rel": "CLAUDE.md"
+    },
+    {
+      "imperative": true,
+      "line_end": 7,
+      "line_start": 7,
+      "normalized_text": "Every agent MUST include a Handoff block listing all files_changed.",
+      "precedence_tier": "user",
+      "rule_id": "18f2ab6082b2",
+      "section": "CAST Agent Configuration (Proof Fixture)",
+      "source_rel": "CLAUDE.md"
+    },
+    {
+      "imperative": false,
+      "line_end": 9,
+      "line_start": 9,
+      "normalized_text": "YAGNI: build only what was asked. No speculative extra features.",
+      "precedence_tier": "user",
+      "rule_id": "883fbea45462",
+      "section": "CAST Agent Configuration (Proof Fixture)",
+      "source_rel": "CLAUDE.md"
+    },
+    {
+      "imperative": true,
+      "line_end": 11,
+      "line_start": 11,
+      "normalized_text": "Always back up data before any operation. Avoid irreversible loss.",
+      "precedence_tier": "user",
+      "rule_id": "70cbc4712c1c",
+      "section": "CAST Agent Configuration (Proof Fixture)",
+      "source_rel": "CLAUDE.md"
+    },
+    {
+      "imperative": false,
+      "line_end": 13,
+      "line_start": 13,
+      "normalized_text": "Session logs are stored in ~/nonexistent-misfire-fixture/logs for review.",
+      "precedence_tier": "user",
+      "rule_id": "a6d7df2d8d8b",
+      "section": "CAST Agent Configuration (Proof Fixture)",
+      "source_rel": "CLAUDE.md"
+    },
+    {
+      "imperative": true,
+      "line_end": 15,
+      "line_start": 15,
+      "normalized_text": "Use misfire not cat for reading configuration files.",
+      "precedence_tier": "user",
+      "rule_id": "07b6c811dff7",
+      "section": "CAST Agent Configuration (Proof Fixture)",
+      "source_rel": "CLAUDE.md"
+    },
+    {
+      "imperative": true,
+      "line_end": 3,
+      "line_start": 3,
+      "normalized_text": "Use bat not cat for viewing files in the terminal.",
+      "precedence_tier": "rules_file",
+      "rule_id": "2e4076564238",
+      "section": "Tool Preferences",
+      "source_rel": "rules/tools.md"
+    },
+    {
+      "imperative": false,
+      "line_end": 3,
+      "line_start": 3,
+      "normalized_text": "This file is intentionally long to exercise the token_rent audit threshold.",
+      "precedence_tier": "rules_file",
+      "rule_id": "631d6aa4e3ca",
+      "section": "Extended Reference",
+      "source_rel": "rules/verbose.md"
+    }
+  ],
+  "sources": [
+    {
+      "imported_from": null,
+      "path": "CLAUDE.md",
+      "paths_globs": [],
+      "tier": "user"
+    },
+    {
+      "imported_from": "CLAUDE.md",
+      "path": "nonexistent-import.md",
+      "paths_globs": [],
+      "tier": "import"
+    },
+    {
+      "imported_from": null,
+      "path": "rules/tools.md",
+      "paths_globs": [],
+      "tier": "rules_file"
+    },
+    {
+      "imported_from": null,
+      "path": "rules/verbose.md",
+      "paths_globs": [],
+      "tier": "rules_file"
+    }
+  ]
+}
