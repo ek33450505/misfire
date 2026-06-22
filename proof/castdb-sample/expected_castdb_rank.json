@@ -1,0 +1,71 @@
+{
+  "cast_db": {
+    "agent_runs_denominator": 40,
+    "db_path_rel": "proof/castdb-sample/generated.db",
+    "mapped_violations": 5,
+    "total_violations_read": 6,
+    "unmapped_by_signal": {
+      "prose_dispatch": 1
+    }
+  },
+  "config_root": "proof/castdb-sample/config",
+  "disclaimer": "Rankings reflect 0 observed tool actions across 3 active rules (2 cast.db output_shape rule(s) are scored against 40 agent_runs \u2014 agent_runs are NOT tool actions and are not summed into this total). Rules below the support floor (min_support=30) are low-confidence; they appear as 'insufficient_evidence'. A rule with zero observed violations is NOT a deletion recommendation \u2014 it may be obeyed, enforced by other means, or simply never triggered (the omniscient-auditor trap). Only 'enforce_candidate' rules, which have both sufficient support AND observed violations, are genuine convert-to-hook candidates. Always review recommendations before acting.",
+  "ranked": [
+    {
+      "confidence": "medium",
+      "convert_kind": "output_shape",
+      "excluded_by_exception": 0,
+      "meets_support_floor": true,
+      "opportunity_count": 40,
+      "predicate": {
+        "hook": "SubagentStop",
+        "signal": "handoff"
+      },
+      "recommendation": "enforce_candidate",
+      "rule_excerpt": "MANDATORY: Every agent in a multi-agent chain MUST include a Handoff block before the Work Log. The\u2026",
+      "rule_id": "f3422e4040af",
+      "source_rel": "CLAUDE.md",
+      "violation_count": 3,
+      "violation_rate": 0.075
+    },
+    {
+      "confidence": "medium",
+      "convert_kind": "output_shape",
+      "excluded_by_exception": 0,
+      "meets_support_floor": true,
+      "opportunity_count": 40,
+      "predicate": {
+        "hook": "SubagentStop",
+        "signal": "status"
+      },
+      "recommendation": "enforce_candidate",
+      "rule_excerpt": "MANDATORY: All agents end with Status: DONE | DONEWITHCONCERNS | BLOCKED | NEEDS_CONTEXT.",
+      "rule_id": "8629c4348d4e",
+      "source_rel": "CLAUDE.md",
+      "violation_count": 2,
+      "violation_rate": 0.05
+    },
+    {
+      "confidence": "insufficient_data",
+      "convert_kind": "never_command",
+      "excluded_by_exception": 0,
+      "meets_support_floor": false,
+      "opportunity_count": 0,
+      "predicate": {
+        "decision": "deny",
+        "match": "git commit",
+        "tool": "Bash"
+      },
+      "recommendation": "observed_no_violations",
+      "rule_excerpt": "MANDATORY: Never use raw git commit directly \u2014 always route through the commit agent.",
+      "rule_id": "0ddf34f69495",
+      "source_rel": "CLAUDE.md",
+      "violation_count": 0,
+      "violation_rate": 0.0
+    }
+  ],
+  "thresholds": {
+    "min_support": 30,
+    "min_violations": 1
+  }
+}

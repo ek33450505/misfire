@@ -100,8 +100,57 @@ With 35 total Bash actions (opportunity floor met at default `min_support=30`):
 
 ---
 
-## No database required
+## Phase 2 (Optional) — cast.db Adapter Proof
 
-Both proofs are purely static or transcript-based — they read markdown and JSONL
-files and apply deterministic logic. No `cast.db`, no Anthropic SDK, no network
-calls. Both proofs run in CI with stdlib-only dependencies.
+This proof exercises the OPTIONAL, flag-gated `--cast-db` substrate (CAST power
+users only). misfire works fully without it; this proves that when engaged, it
+reconstructs output-shape (Handoff / Status) rule violations honestly.
+
+### Reproduce in one command
+
+From the repo root, first (re)build the synthetic DB from the committed SQL, then run:
+
+```sh
+python3 -c "import sqlite3; c=sqlite3.connect('proof/castdb-sample/generated.db'); \
+    c.executescript(open('proof/castdb-sample/seed.sql').read()); c.commit(); c.close()"
+misfire rank proof/castdb-sample/config \
+    --cast-db proof/castdb-sample/generated.db \
+    --projects-dir "$(mktemp -d)" --json
+```
+
+The output must match `proof/castdb-sample/expected_castdb_rank.json` byte-for-byte.
+`tests/test_proof_castdb.py` asserts this on every run.
+
+### What the fixture exercises
+
+`proof/castdb-sample/seed.sql` builds a synthetic `cast.db` (the three real
+tables, no PII) with 6 `agent_protocol_violations` rows + 40 non-running
+`agent_runs` (+ 2 running, excluded):
+
+| cast.db `violation`        | rows | maps to prose rule                  | outcome           |
+|----------------------------|------|-------------------------------------|-------------------|
+| `handoff_schema_violation` | 3    | `## Handoff block …`                | enforce_candidate |
+| `missing_formality`        | 2    | `… end with Status: DONE \| …`      | enforce_candidate |
+| `prose_dispatch`           | 1    | (no clean rule)                     | UNMAPPED (honest) |
+
+The `agent_runs` count (40, running excluded) is the opportunity denominator —
+an UPPER BOUND, so the reported violation rate is a conservative LOWER BOUND.
+
+### Portability + binary-DB note
+
+`generated.db` is gitignored and rebuilt from `seed.sql` on every run — only the
+SQL text is committed, never the binary DB. `config_root` and the
+`cast_db.db_path_rel` are echoed as the relative strings supplied, so the
+committed fixture contains ZERO `/Users/`, `/home/`, `/private/`, or `Projects/`
+substrings.
+
+---
+
+## No database required (core)
+
+The Phase 1 and Phase 2 (transcript) proofs are purely static or
+transcript-based — they read markdown and JSONL files and apply deterministic
+logic. No `cast.db`, no Anthropic SDK, no network calls. The cast.db proof above
+is the ONLY proof that touches a database, and that database is synthetic,
+local, and opened strictly read-only. All proofs run in CI with stdlib-only
+dependencies.
