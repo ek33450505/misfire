@@ -51,15 +51,15 @@
   "findings": [
     {
       "detail": {
-        "approx_total_tokens": 633,
+        "approx_total_tokens": 635,
         "source_file_count": 3,
         "token_heuristic": "chars/4",
-        "total_chars": 2533,
+        "total_chars": 2541,
         "total_lines": 228
       },
       "kind": "token_rent",
       "line": null,
-      "message": "Total config: 228 lines / ~633 tokens (heuristic: chars/4) across 3 source file(s).",
+      "message": "Total config: 228 lines / ~635 tokens (heuristic: chars/4) across 3 source file(s).",
       "severity": "info",
       "source_rel": "(aggregate)"
     },

@@ -388,10 +388,14 @@ class TestTokenRent:
 
 class TestConflicts:
     def test_tool_substitution_conflict_flagged(self, tmp_path: Path) -> None:
-        """Two rules 'use X not grep' and 'use Y not grep' conflict on prefer."""
+        """Two rules 'use `X` not `grep`' and 'use `Y` not `grep`' conflict on prefer.
+
+        Backtick wrapping is required for tool_substitution classification —
+        matching the real-world convention for CLI tool swap rules.
+        """
         content = textwrap.dedent("""\
-            - Use rg not grep for searching
-            - Use ag not grep when possible
+            - Use `rg` not `grep` for searching
+            - Use `ag` not `grep` when possible
         """)
         config_root = _make_config(tmp_path, content)
         pr = parse_config(config_root)

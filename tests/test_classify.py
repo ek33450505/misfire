@@ -327,9 +327,13 @@ class TestConvertibleNeverCommand:
 
 class TestConvertibleToolSubstitution:
     def test_use_rg_not_grep(self):
-        """'use rg not grep' → convertible / tool_substitution with predicate."""
+        """'use `rg` not `grep`' → convertible / tool_substitution with predicate.
+
+        Both tokens must be backtick-wrapped in raw_text; normalized_text is the
+        markup-stripped form the regex matches against.
+        """
         rule = _make_rule(
-            raw_text="use rg not grep",
+            raw_text="use `rg` not `grep`",
             normalized_text="use rg not grep",
             imperative=True,  # "use...not" matches _IMPERATIVE_RE
         )
@@ -344,9 +348,12 @@ class TestConvertibleToolSubstitution:
         assert c.is_safety is False
 
     def test_use_pnpm_instead_of_npm(self):
-        """'use pnpm instead of npm' → convertible / tool_substitution."""
+        """'use `pnpm` instead of `npm`' → convertible / tool_substitution.
+
+        Backtick wrapping in raw_text is required; normalized_text has no backticks.
+        """
         rule = _make_rule(
-            raw_text="Always use pnpm instead of npm for package management.",
+            raw_text="Always use `pnpm` instead of `npm` for package management.",
             normalized_text="Always use pnpm instead of npm for package management.",
             imperative=True,
         )
@@ -356,6 +363,80 @@ class TestConvertibleToolSubstitution:
         assert c.convert_kind == CONVERT_TOOL_SUBSTITUTION
         assert c.predicate["forbidden"] == "npm"
         assert c.predicate["prefer"] == "pnpm"
+
+    # ------------------------------------------------------------------
+    # False-positive regression tests (Phase 2 junk-rule bug)
+    # ------------------------------------------------------------------
+
+    def test_sql_create_not_exists_is_judgment_keep(self):
+        """'use `CREATE TABLE IF NOT EXISTS`' is a SQL multi-word phrase, NOT a CLI swap.
+
+        The backtick-wrapped phrase spans multiple words so no individual token
+        matches; falls through to judgment_keep.
+        """
+        rule = _make_rule(
+            raw_text=(
+                "Schema changes: use `CREATE TABLE IF NOT EXISTS` and "
+                "`ALTER TABLE ... ADD COLUMN` with try/except for idempotency"
+            ),
+            normalized_text=(
+                "Schema changes: use CREATE TABLE IF NOT EXISTS and "
+                "ALTER TABLE ... ADD COLUMN with try/except for idempotency"
+            ),
+            imperative=True,
+        )
+        c = classify_rule(rule)
+
+        assert c.category == CATEGORY_JUDGMENT_KEEP, (
+            f"SQL keywords should be judgment_keep, not {c.category}/{c.convert_kind}"
+        )
+        assert c.convert_kind != CONVERT_TOOL_SUBSTITUTION
+
+    def test_jest_vitest_framework_choice_is_judgment_keep(self):
+        """'not Jest' is a test-framework judgment, NOT a Bash CLI swap.
+
+        Neither 'Vitest' nor 'Jest' is backtick-wrapped; TitleCase also fails
+        the command-name shape check.  Must classify as judgment_keep.
+        """
+        rule = _make_rule(
+            raw_text=(
+                "Use Vitest + React Testing Library for tests (not Jest in Vite projects)"
+            ),
+            normalized_text=(
+                "Use Vitest + React Testing Library for tests (not Jest in Vite projects)"
+            ),
+            imperative=True,
+        )
+        c = classify_rule(rule)
+
+        assert c.category == CATEGORY_JUDGMENT_KEEP, (
+            f"Framework choice should be judgment_keep, not {c.category}/{c.convert_kind}"
+        )
+        assert c.convert_kind != CONVERT_TOOL_SUBSTITUTION
+
+    def test_bitbucket_github_hosting_service_is_judgment_keep(self):
+        """'use bitbucket.org, not github.com' is a hosting-service preference, NOT a CLI swap.
+
+        No backtick wrapping; github/bitbucket are also in the stoplist.
+        Must classify as judgment_keep.
+        """
+        rule = _make_rule(
+            raw_text=(
+                "Remote: Bitbucket (not GitHub). When scaffolding remote URLs, "
+                "CI config, or PR commands, use bitbucket.org, not github.com."
+            ),
+            normalized_text=(
+                "Remote: Bitbucket (not GitHub). When scaffolding remote URLs, "
+                "CI config, or PR commands, use bitbucket.org, not github.com."
+            ),
+            imperative=True,
+        )
+        c = classify_rule(rule)
+
+        assert c.category == CATEGORY_JUDGMENT_KEEP, (
+            f"Hosting service should be judgment_keep, not {c.category}/{c.convert_kind}"
+        )
+        assert c.convert_kind != CONVERT_TOOL_SUBSTITUTION
 
 
 class TestConvertibleBeforeAction:

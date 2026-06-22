@@ -12,6 +12,6 @@ Always back up data before any operation. Avoid irreversible loss.
 
 Session logs are stored in ~/nonexistent-misfire-fixture/logs for review.
 
-Use misfire not cat for reading configuration files.
+Use `misfire` not `cat` for reading configuration files.
 
 @nonexistent-import.md

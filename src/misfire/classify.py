@@ -193,6 +193,20 @@ _TOOL_SUB_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Validation helpers for tool_substitution guard.
+# Shape: shell command name — lowercase start, alphanumeric/underscore/hyphen, ≤31 chars.
+# Kills TitleCase (Jest, Vitest), ALLCAPS (EXISTS, CREATE), dotted hostnames (github.com).
+_COMMAND_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,30}$")
+
+# Stoplist: hosting services and obvious non-CLI tokens that pass shape check.
+_TOOL_STOPLIST = frozenset({
+    "github", "gitlab", "bitbucket", "sourceforge",
+})
+
+# Backtick-wrapped single-token extractor (no whitespace inside backticks).
+# A genuine "use `rg` not `grep`" backticks its commands; prose does not.
+_BACKTICK_TOKEN_RE = re.compile(r"`([^`\s]+)`")
+
 # before_action: "run/check/do X before commit/push/edit/..."
 _BEFORE_ACTION_RE = re.compile(
     r"\b(run|check|do|add|stage|ensure|invoke|verify)\b.{0,80}?\bbefore\b"
@@ -282,18 +296,48 @@ def _try_never_command(norm: str) -> Optional[tuple]:
     return None
 
 
-def _try_tool_substitution(norm: str) -> Optional[tuple]:
-    """Return (predicate, confidence) for 'use A not B' / 'use A instead of B'."""
+def _try_tool_substitution(norm: str, raw: str) -> Optional[tuple]:
+    """Return (predicate, confidence) for 'use A not B' / 'use A instead of B'.
+
+    All three guards must pass — conservative bias: ambiguous → None → judgment_keep.
+
+    Guard 1 (backtick-wrapped): both tokens must appear as individually
+    backtick-wrapped single tokens (no whitespace) in ``raw``.  A genuine CLI
+    swap like "use `rg` not `grep`" backticks its commands; prose rules that
+    use "not" in passing (e.g. "not Jest", "not GitHub") do not.
+
+    Guard 2 (shape): both tokens must match ``^[a-z][a-z0-9_-]{0,30}$`` —
+    lowercase start, no uppercase.  Kills ALLCAPS SQL keywords (EXISTS, CREATE)
+    and TitleCase framework names (Jest, Vitest).
+
+    Guard 3 (stoplist): neither token may be a known hosting service or obvious
+    non-CLI word (github, gitlab, bitbucket, …).
+    """
     m = _TOOL_SUB_RE.search(norm)
-    if m:
-        prefer = m.group(1)
-        forbidden = m.group(3)
-        return {
-            "tool": "Bash",
-            "forbidden": forbidden,
-            "prefer": prefer,
-        }, CONFIDENCE_HIGH
-    return None
+    if not m:
+        return None
+
+    prefer = m.group(1)
+    forbidden = m.group(3)
+
+    # Guard 1: both tokens must be individually backtick-wrapped in raw_text.
+    backtick_tokens = set(_BACKTICK_TOKEN_RE.findall(raw))
+    if prefer not in backtick_tokens or forbidden not in backtick_tokens:
+        return None
+
+    # Guard 2: command-name shape — lowercase start, no uppercase/dots.
+    if not _COMMAND_NAME_RE.match(prefer) or not _COMMAND_NAME_RE.match(forbidden):
+        return None
+
+    # Guard 3: not a hosting service or other obvious non-CLI token.
+    if prefer.lower() in _TOOL_STOPLIST or forbidden.lower() in _TOOL_STOPLIST:
+        return None
+
+    return {
+        "tool": "Bash",
+        "forbidden": forbidden,
+        "prefer": prefer,
+    }, CONFIDENCE_HIGH
 
 
 def _try_before_action(norm: str) -> Optional[tuple]:
@@ -428,7 +472,7 @@ def classify_rule(rule: Rule) -> Classification:
         )
 
     # 4b. tool_substitution
-    ts_result = _try_tool_substitution(norm)
+    ts_result = _try_tool_substitution(norm, raw)
     if ts_result:
         predicate, confidence = ts_result
         return Classification(
