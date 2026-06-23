@@ -372,6 +372,103 @@ asserting it denies `git commit`, allows `git status`, ignores a quoted
 
 ---
 
+## `misfire ablate RULE_ID [CONFIG_ROOT]`
+
+**[OPT-IN — requires a running local Ollama]**
+
+Causal probe: runs a representative task through a local Ollama model under two
+conditions — the candidate rule present vs. removed (ablated) — N trials each, and
+deterministically measures whether the model's proposed shell command violates the
+rule's predicate (reusing `match.command_invokes`). Reports the violation rate in each
+condition and the shift. Never writes files; always exits 0.
+
+Before running, start Ollama and pull a model:
+
+```sh
+ollama serve            # in a separate terminal, if not already running
+ollama pull llama3      # or: ollama pull qwen2.5:7b
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `RULE_ID` (positional) | — | `rule_id` prefix of a convertible rule — use `misfire rank` to list prefixes |
+| `CONFIG_ROOT` (positional) | `~/.claude` | Config root directory |
+| `--model MODEL` | `llama3` | Ollama model name |
+| `--trials N` | `5` | Trials per condition (present and ablated each run N times) |
+| `--temperature T` | `0.7` | Sampling temperature |
+| `--task PROMPT` | auto-synthesized | Override the representative task prompt |
+| `--ollama-url URL` | `http://localhost:11434` | Ollama base URL |
+| `--projects-dir DIR` | `~/.claude/projects` | Accepted for parity with other commands; unused by `ablate` |
+| `--json` | off | Deterministic JSON (byte-stable; `sort_keys=True`) |
+
+`ablate` only runs on convertible rules with `convert_kind` in
+`{never_command, tool_substitution}`. Passing a safety, judgment, or other
+non-convertible rule exits 0 with an honest error message.
+
+### Why it exists
+
+`rank` identifies which rules your agents demonstrably ignore in passive traces. But a
+rule with zero observed violations is ambiguous: did agents obey it, or did it simply
+never apply? Ablation breaks that tie by measuring the **marginal causal effect** — does
+removing the rule change behavior in a controlled probe?
+
+A positive shift (violation rate rises when the rule is ablated) is evidence the rule is
+doing work. A zero or negative shift is **not** a deletion signal — see the worked
+examples below.
+
+### Worked example A — causal effect found
+
+A `tool_substitution` rule a local model CAN self-enforce:
+
+```sh
+misfire ablate 1c63f32ec3cf ./myproject --model qwen2.5:7b --trials 5
+```
+
+```text
+Rule:       1c63f32ec3cf  [tool_substitution]
+Excerpt:    "Always use rg (ripgrep) instead of grep when searching file contents."
+Violation rate (present):  0%   (0/5 trials)
+Violation rate (ablated):  80%  (4/5 trials)
+Shift (ablated − present): +80%
+→ Ablating this rule raised the violation rate by 80% (0% → 80%; 4 more of 5 trials
+  violated when ablated) — evidence of a marginal causal effect (the rule appears to be doing work).
+```
+
+A +80% shift is evidence the rule suppresses the violation in this probe. These are live
+`qwen2.5:7b` runs at temperature 0.7, so exact rates vary run to run (an earlier run
+measured 4/4 ablated) — which is exactly why the small-N caveat matters. Whether it holds
+with your production model at scale is a separate question — the local model is a proxy.
+
+### Worked example B — no shift; honest non-overclaim
+
+An org-specific `never_command` rule a generic local model cannot self-enforce:
+
+```sh
+misfire ablate eccf5aa75d9d --model qwen2.5:7b --trials 5
+```
+
+```text
+Rule:       eccf5aa75d9d  [never_command]
+Excerpt:    "MANDATORY: Never git commit directly — use the commit agent"
+Violation rate (present):  100%  (5/5 trials)
+Violation rate (ablated):  100%  (5/5 trials)
+Shift (ablated − present): +0%
+→ No material behavior shift observed. NOT evidence the rule is useless or deletable —
+  may be beyond this proxy model's sensitivity.
+```
+
+A zero shift here is informative, not a failure. "Use the commit agent" is an
+org-specific convention a generic local model has never seen. It violates the rule in
+every trial regardless of whether the rule is present, because the model has no
+training-time knowledge of the commit agent. This is itself a signal: a rule that a
+generic model cannot act on in a one-shot probe likely belongs as a **deterministic
+hook** (`misfire convert`) rather than model self-policing.
+
+A zero or negative shift is **never a deletion recommendation** — the rule may be
+obeyed, redundant, or simply untestable with this task/model combination.
+
+---
+
 ## Privacy and sanitization
 
 All output — text and `--json` alike — is machine-path sanitized at the output boundary:

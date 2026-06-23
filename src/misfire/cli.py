@@ -71,6 +71,16 @@ from misfire.rank import (
     RankReport,
     RankedRule,
 )
+from misfire.ablate import (
+    AblationReport,
+    DEFAULT_MODEL,
+    DEFAULT_OLLAMA_URL,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_TRIALS,
+    OllamaClient,
+    report_to_dict,
+    run_ablation,
+)
 from misfire.scaffold import (
     HookScaffold,
     RUNG_ENFORCE,
@@ -1466,6 +1476,98 @@ def _cmd_audit(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# ablate command — text output
+# ---------------------------------------------------------------------------
+
+
+def _print_ablate_text(report: AblationReport) -> None:
+    """Print a human-readable ablation report to stdout."""
+    print("misfire ablate — Phase 4 causal probe (opt-in, no files written)")
+    print()
+    print(f"Rule:       {report.rule_id}  [{report.convert_kind}]")
+    print(f"Source:     {report.source_rel}")
+    print(f'Excerpt:    "{report.rule_excerpt}"')
+    print()
+    print(f"Model:      {report.model}")
+    print(f"Trials:     {report.trials} per condition")
+    print(f"Temp:       {report.temperature}")
+    print()
+
+    if not report.model_available:
+        print("Ollama not reachable — skipped.")
+        print()
+        print(report.error)
+        return
+
+    if report.error:
+        print(f"Error: {report.error}")
+        return
+
+    print(
+        f"Task:       {report.task_prompt[:120]}"
+        + ("…" if len(report.task_prompt) > 120 else "")
+    )
+    print()
+    pct_p = report.violation_rate_present * 100
+    pct_a = report.violation_rate_ablated * 100
+    pct_s = report.shift * 100
+    print(f"Violation rate (present):  {pct_p:.0f}%  ({report.n_present_violations}/{report.trials} trials)")
+    print(f"Violation rate (ablated):  {pct_a:.0f}%  ({report.n_ablated_violations}/{report.trials} trials)")
+    print(f"Shift (ablated − present): {pct_s:+.0f}%")
+    print()
+    print(report.interpretation)
+    print()
+    print("Caveats:")
+    for d in report.disclaimers:
+        print(f"  • {d}")
+
+
+# ---------------------------------------------------------------------------
+# ablate command dispatcher
+# ---------------------------------------------------------------------------
+
+
+def _cmd_ablate(args: argparse.Namespace) -> int:
+    """Implement ``misfire ablate``.
+
+    Observer posture: ALWAYS returns 0.  No files are written; no settings
+    are mutated.  All output is PII-free (home-collapsed).
+
+    Graceful degradation: unreachable Ollama, unknown rule prefix, non-
+    convertible rule, bad model name → honest message, exit 0, no traceback.
+    """
+    config_root: Path = (
+        Path(args.config_root).expanduser().resolve()
+        if args.config_root is not None
+        else Path.home() / ".claude"
+    )
+
+    parse_result = parse_config(config_root)
+    rules = parse_result.rules
+    classifications = classify_rules(rules)
+
+    client = OllamaClient(base_url=args.ollama_url)
+
+    report = run_ablation(
+        args.rule,
+        rules,
+        classifications,
+        client=client,
+        model=args.model,
+        trials=args.trials,
+        temperature=args.temperature,
+        task=args.task,
+    )
+
+    if args.json:
+        print(json.dumps(report_to_dict(report), sort_keys=True, indent=2))
+    else:
+        _print_ablate_text(report)
+
+    return 0  # Observer posture: always 0
+
+
+# ---------------------------------------------------------------------------
 # Parser construction
 # ---------------------------------------------------------------------------
 
@@ -1700,6 +1802,78 @@ def build_parser() -> argparse.ArgumentParser:
         help="output deterministic JSON (byte-stable; sort_keys=True)",
     )
 
+    # --- ablate (Phase 4) ---
+    ablate_parser = subparsers.add_parser(
+        "ablate",
+        help=(
+            "[Phase 4, OPT-IN] Causal probe: re-run a representative task with vs "
+            "without a candidate rule via a LOCAL Ollama model; measure the behavior "
+            "shift. Requires a running Ollama; never writes files."
+        ),
+    )
+    ablate_parser.add_argument(
+        "rule",
+        metavar="RULE_ID",
+        help="rule_id prefix of a convertible rule to ablate",
+    )
+    ablate_parser.add_argument(
+        "config_root",
+        nargs="?",
+        default=None,
+        metavar="CONFIG_ROOT",
+        help="config root directory (default: ~/.claude)",
+    )
+    ablate_parser.add_argument(
+        "--model",
+        dest="model",
+        default=DEFAULT_MODEL,
+        metavar="MODEL",
+        help=f"Ollama model name to use (default: {DEFAULT_MODEL})",
+    )
+    ablate_parser.add_argument(
+        "--trials",
+        dest="trials",
+        type=int,
+        default=DEFAULT_TRIALS,
+        metavar="N",
+        help=f"number of trials per condition (default: {DEFAULT_TRIALS})",
+    )
+    ablate_parser.add_argument(
+        "--temperature",
+        dest="temperature",
+        type=float,
+        default=DEFAULT_TEMPERATURE,
+        metavar="T",
+        help=f"sampling temperature (default: {DEFAULT_TEMPERATURE})",
+    )
+    ablate_parser.add_argument(
+        "--task",
+        dest="task",
+        default=None,
+        metavar="PROMPT",
+        help="override the representative task prompt (default: auto-synthesized)",
+    )
+    ablate_parser.add_argument(
+        "--ollama-url",
+        dest="ollama_url",
+        default=DEFAULT_OLLAMA_URL,
+        metavar="URL",
+        help=f"Ollama base URL (default: {DEFAULT_OLLAMA_URL})",
+    )
+    ablate_parser.add_argument(
+        "--projects-dir",
+        dest="projects_dir",
+        default=None,
+        metavar="DIR",
+        help="Claude Code projects directory (default: ~/.claude/projects; unused by ablate)",
+    )
+    ablate_parser.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="output deterministic JSON (byte-stable; sort_keys=True)",
+    )
+
     return parser
 
 
@@ -1727,6 +1901,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "rank": _cmd_rank,
         "evidence": _cmd_evidence,
         "convert": _cmd_convert,
+        "ablate": _cmd_ablate,
     }
 
     if args.command in dispatch:

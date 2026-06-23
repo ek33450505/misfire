@@ -286,10 +286,14 @@ all output (text and JSON) is machine-path sanitized — `/Users/<name>/` and
 `/home/<name>/` collapse to `~/`, paths under `config_root` are made relative, no
 usernames leak.
 
-The **only** LLM use anywhere is an opt-in, local-Ollama causal-ablation probe
-(Phase 4, **not yet shipped**), gated behind an explicit flag. It never touches the
-deterministic path. This matches the portfolio DNA of `attest` and `looptrip`:
-zero-LLM cores with explicit opt-in extensions.
+The **only** LLM use anywhere is `misfire ablate` (Phase 4, opt-in), gated behind an
+explicit `ablate` subcommand. It never touches the deterministic path. `ablate` is
+stdlib-only — a thin `urllib` client (`OllamaClient`) behind an injectable `ChatClient`
+protocol so tests pass a stub and the probe never fires in CI. It reads your config and
+calls Ollama only; no files are written and no settings are mutated. Results are
+evidence only — the module produces an `AblationReport`; it never auto-applies or
+auto-deletes. This matches the portfolio DNA of `attest` and `looptrip`: zero-LLM
+cores with explicit opt-in extensions.
 
 ---
 
@@ -307,7 +311,8 @@ dependencies, `requires-python >= 3.9`.
 | `match.py` | The structural command matcher (`command_invokes` / `_strip_quoted_spans`); joins tool actions to rule predicates, stripping quoted spans. |
 | `rank.py` | Per-rule violation + opportunity counts; confidence labels, minimum-support floor, the buckets, and the zero-violation HARD GUARD. |
 | `scaffold.py` | The zero-LLM, templated hook scaffolder; emits the hook (with the matcher inlined) + the `settings.json` snippet, never writing it. |
-| `cli.py` | The `misfire` entry point — `audit` / `rank` / `evidence` / `convert`, plus `--version`; every command supports `--json`. |
+| `cli.py` | The `misfire` entry point — `audit` / `rank` / `evidence` / `convert` / `ablate`, plus `--version`; every command supports `--json`. |
+| `ablate.py` | Opt-in causal ablation probe: runs a representative task under present/ablated conditions via a local Ollama model; stdlib-only `urllib` client (`OllamaClient`) behind an injectable `ChatClient` protocol; produces an `AblationReport`, never writes files. |
 | `adapters/transcript.py` | Portable, default adapter: reads Claude Code transcript JSONL under `~/.claude/projects/**`, yields `ToolAction`s. No DB required. |
 | `adapters/cast_db.py` | Optional, flag-gated (`--cast-db`), strictly read-only cast.db adapter; adds `output_shape` violations for CAST power-users. |
 | `__init__.py` (package) | Package marker / version for `misfire`. |
