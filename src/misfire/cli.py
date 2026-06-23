@@ -29,6 +29,7 @@ Sanitization is applied at the output boundary in this module; ``audit.py`` and
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import re
@@ -37,6 +38,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from misfire import __version__
+from misfire.adapters.cast_db import (
+    CastDbResult,
+    CONVERT_OUTPUT_SHAPE,
+    castdb_available,
+    find_output_shape_violations,
+)
 from misfire.adapters.transcript import iter_tool_actions
 from misfire.audit import (
     Finding,
@@ -75,6 +82,133 @@ def _stub(cmd: str, phase: int) -> int:
 
 def _cmd_convert(_args: argparse.Namespace) -> int:
     return _stub("convert", 3)
+
+
+# ---------------------------------------------------------------------------
+# Optional cast.db enablement (portable-first: default OFF)
+# ---------------------------------------------------------------------------
+
+
+class _CastDbDefault:
+    """Sentinel: ``--cast-db`` given with NO value → use the default cast.db."""
+
+
+# argparse ``const`` value meaning "use the default ~/.claude/cast.db path".
+_CASTDB_DEFAULT = _CastDbDefault()
+
+
+def _resolve_cast_db(cast_db_arg: object) -> Optional[Path]:
+    """Resolve the ``--cast-db`` argument into a usable Path, or ``None`` if OFF.
+
+    - ``None`` (flag absent)              → ``None`` (cast.db is NOT touched).
+    - ``_CASTDB_DEFAULT`` (flag, no value) → ``~/.claude/cast.db``.
+    - a string (flag with a value)         → that path.
+
+    The path is only ``expanduser``-ed, NOT ``resolve``-d: a relative input stays
+    relative and a ``~`` input home-collapses, so the ``db_path_rel`` echoed in
+    output stays portable (mirroring how ``config_root_raw`` is preserved).
+    """
+    if cast_db_arg is None:
+        return None
+    if isinstance(cast_db_arg, _CastDbDefault):
+        return (Path("~") / ".claude" / "cast.db").expanduser()
+    return Path(str(cast_db_arg)).expanduser()
+
+
+def _cast_db_summary(result: CastDbResult) -> Dict:
+    """Build the JSON/text provenance summary for a cast.db result."""
+    return {
+        "agent_runs_denominator": result.agent_runs_denominator,
+        "db_path_rel": result.db_path_rel,
+        "mapped_violations": result.mapped_violations,
+        "total_violations_read": result.total_violations_read,
+        "unmapped_by_signal": result.unmapped_by_signal,
+    }
+
+
+def _maybe_augment_with_cast_db(
+    args: argparse.Namespace,
+    classifications: List[Classification],
+    rules_by_id: Dict[str, Rule],
+    rule_violations: List[RuleViolation],
+) -> Tuple[List[RuleViolation], Optional[CastDbResult]]:
+    """Optionally append cast.db output_shape violations to ``rule_violations``.
+
+    Portable-first / observer posture:
+    - Flag absent → returns the input list unchanged and ``None`` (cast.db is
+      never opened).
+    - DB unavailable (missing / unreadable / missing tables) → prints a concise
+      notice to STDERR and returns the input list unchanged and ``None``.  Exit
+      status is unaffected (the caller still returns 0).
+    - DB available → returns ``input + result.rule_violations`` and the result.
+    """
+    cast_db_path = _resolve_cast_db(args.cast_db)
+    if cast_db_path is None:
+        return rule_violations, None
+
+    availability = castdb_available(cast_db_path)
+    if not availability.available:
+        print(
+            f"cast.db: {availability.reason} at {availability.db_path_rel} "
+            "— continuing with transcript evidence only",
+            file=sys.stderr,
+        )
+        return rule_violations, None
+
+    result = find_output_shape_violations(
+        classifications, rules_by_id, db_path=cast_db_path
+    )
+    return rule_violations + result.rule_violations, result
+
+
+def _print_cast_db_provenance(result: CastDbResult) -> None:
+    """Print a concise cast.db provenance line to STDERR (text mode)."""
+    print(
+        f"cast.db: {result.db_path_rel} — "
+        f"{result.total_violations_read} protocol violations read, "
+        f"{result.mapped_violations} mapped, "
+        f"agent_runs denominator {result.agent_runs_denominator}",
+        file=sys.stderr,
+    )
+    if result.unmapped_by_signal:
+        unmapped = ", ".join(
+            f"{k}={v}" for k, v in sorted(result.unmapped_by_signal.items())
+        )
+        print(f"cast.db: unmapped (no matching prose rule): {unmapped}", file=sys.stderr)
+
+
+def _disclaimer_excluding_castdb_actions(
+    report: RankReport,
+    transcript_violations: List[RuleViolation],
+    cast_db_result: CastDbResult,
+) -> str:
+    """Rewrite the rank disclaimer so cast.db ``agent_runs`` are not mislabeled.
+
+    ``rank_rules`` sums ``opportunity_count`` across ALL ranked rules and labels
+    the total "observed tool actions".  cast.db output_shape ``RuleViolation``s
+    carry the ``agent_runs`` denominator (one shared value, emitted once PER
+    signal — so it is double-counted across the handoff + status rules), and
+    ``agent_runs`` are NOT tool actions.  We replace the headline figure with the
+    transcript-only action total and disclose the single ``agent_runs``
+    denominator separately, exactly once.
+    """
+    transcript_actions = sum(rv.opportunity_count for rv in transcript_violations)
+    castdb_actions = sum(rv.opportunity_count for rv in cast_db_result.rule_violations)
+    n_castdb = len(cast_db_result.rule_violations)
+    n_rules_total = len(transcript_violations) + n_castdb
+    old_total = transcript_actions + castdb_actions
+    old_first = (
+        f"Rankings reflect {old_total} observed tool actions "
+        f"across {n_rules_total} active rules."
+    )
+    new_first = (
+        f"Rankings reflect {transcript_actions} observed tool actions "
+        f"across {n_rules_total} active rules "
+        f"({n_castdb} cast.db output_shape rule(s) are scored against "
+        f"{cast_db_result.agent_runs_denominator} agent_runs — agent_runs are "
+        f"NOT tool actions and are not summed into this total)."
+    )
+    return report.disclaimer.replace(old_first, new_first, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -190,17 +324,21 @@ def _sanitize_finding(f: Finding, config_root: Path) -> Finding:
 # Command sanitization (evidence output — strip /Users/<n>/ from commands)
 # ---------------------------------------------------------------------------
 
-# Matches /Users/<name>/ or /home/<name>/ (for portability to Linux CI runners)
-_ABS_HOME_PATH_RE = re.compile(r"/(Users|home)/[^/\s]+/")
+# Matches /Users/<name> or /home/<name> (for portability to Linux CI runners).
+# NO trailing slash is required: a bare "/Users/ed" (e.g. "cwd: /Users/ed") must
+# also collapse, or the username leaks.  The replacement is "~" (not "~/") so
+# "/Users/alice/secret" → "~/secret" and bare "/Users/bob" → "~" both hold.
+_ABS_HOME_PATH_RE = re.compile(r"/(?:Users|home)/[^/\s]+")
 
 
 def _sanitize_command_str(cmd: str) -> str:
-    """Collapse ``/Users/<name>/`` or ``/home/<name>/`` → ``~/`` in a command string.
+    """Collapse ``/Users/<name>`` or ``/home/<name>`` → ``~`` in a command string.
 
     Applied to all Bash command excerpts in ``evidence`` output so that real
-    transcripts containing absolute paths never leak a username.
+    transcripts containing absolute paths never leak a username — including a
+    bare directory/cwd reference with no trailing slash.
     """
-    return _ABS_HOME_PATH_RE.sub("~/", cmd)
+    return _ABS_HOME_PATH_RE.sub("~", cmd)
 
 
 # ---------------------------------------------------------------------------
@@ -413,10 +551,15 @@ def _ranked_rule_to_dict(rr: RankedRule) -> Dict:
 
 
 def _violation_to_dict(action: ToolAction) -> Dict:
-    """Serialize a ToolAction violation to a JSON-safe dict with command sanitized."""
+    """Serialize a ToolAction violation to a JSON-safe dict with command sanitized.
+
+    When ``command`` is empty (cast.db rows, Edit/Write, tool_substitution), the
+    ``command`` field falls back to the (already-sanitised) ``input_summary`` so
+    the evidence is never blank.
+    """
     return {
         "agent_type": action.agent_type,
-        "command": _sanitize_command_str(action.command),
+        "command": _sanitize_command_str(action.command or action.input_summary),
         "is_sidechain": action.is_sidechain,
         "session_id": action.session_id,
         "timestamp": action.timestamp,
@@ -561,7 +704,7 @@ def _build_audit_json(
 
     output = {
         "classification_counts": counts,
-        "config_root": config_root_raw,
+        "config_root": _display_config_root(config_root_raw),
         "convertible": convertible_list,
         "findings": findings_dicts,
         "rules": rules_dicts,
@@ -631,18 +774,28 @@ def _print_rank_text(
 # ---------------------------------------------------------------------------
 
 
-def _build_rank_json(report: RankReport, config_root_raw: str) -> str:
+def _build_rank_json(
+    report: RankReport,
+    config_root_raw: str,
+    cast_db_result: Optional[CastDbResult] = None,
+) -> str:
     """Build deterministic JSON for the rank command.
 
     Uses ``sort_keys=True, indent=2`` for byte-stable output across machines.
     The ``ranked`` list is already in canonical order from ``rank_rules``.
+
+    When ``cast_db_result`` is provided (the optional cast.db substrate was
+    engaged and the DB was available), a top-level ``cast_db`` provenance object
+    is included.  Absent the flag, the output is byte-identical to before.
     """
     output = {
-        "config_root": config_root_raw,
+        "config_root": _display_config_root(config_root_raw),
         "disclaimer": report.disclaimer,
         "ranked": [_ranked_rule_to_dict(rr) for rr in report.ranked],
         "thresholds": report.thresholds,
     }
+    if cast_db_result is not None:
+        output["cast_db"] = _cast_db_summary(cast_db_result)
     return json.dumps(output, indent=2, sort_keys=True)
 
 
@@ -687,7 +840,13 @@ def _cmd_rank(args: argparse.Namespace) -> int:
     exceptions = _extract_exceptions(classifications, rules_by_id)
 
     actions = iter_tool_actions(projects_dir)
-    rule_violations = find_violations(classifications, actions, exceptions=exceptions)
+    transcript_violations = find_violations(classifications, actions, exceptions=exceptions)
+
+    # OPTIONAL cast.db substrate (default OFF; portable-first).  Augments the
+    # transcript evidence with output_shape (Handoff / Status) violations.
+    rule_violations, cast_db_result = _maybe_augment_with_cast_db(
+        args, classifications, rules_by_id, transcript_violations
+    )
 
     report = rank_rules(
         rule_violations,
@@ -696,10 +855,24 @@ def _cmd_rank(args: argparse.Namespace) -> int:
         min_violations=min_violations,
     )
 
+    # HONESTY FIX: when cast.db is engaged, rank_rules folded the agent_runs
+    # denominators (one per signal, double-counted) into the disclaimer's
+    # "observed tool actions" headline.  Correct that figure here so agent_runs
+    # are disclosed separately and never mislabeled as tool actions.
+    if cast_db_result is not None:
+        report = dataclasses.replace(
+            report,
+            disclaimer=_disclaimer_excluding_castdb_actions(
+                report, transcript_violations, cast_db_result
+            ),
+        )
+
     if args.json:
-        print(_build_rank_json(report, config_root_raw))
+        print(_build_rank_json(report, config_root_raw, cast_db_result))
     else:
         _print_rank_text(report, config_root_display, projects_dir_display)
+        if cast_db_result is not None:
+            _print_cast_db_provenance(cast_db_result)
 
     return 0
 
@@ -721,10 +894,21 @@ def _print_evidence_text(
     print(f"Rule: {rr.rule_id}  [{rr.convert_kind}]  confidence={rr.confidence}")
     print(f"\"{rr.rule_excerpt}\"")
     rate_pct = f"{rr.violation_rate * 100:.1f}%"
-    print(
-        f"Violations: {rr.violation_count}  Opportunities: {rr.opportunity_count}  "
-        f"Rate: {rate_pct}  Excluded (sanctioned): {rr.excluded_by_exception}"
-    )
+    if rr.convert_kind == CONVERT_OUTPUT_SHAPE:
+        # cast.db-sourced: the denominator is agent_runs (an UPPER BOUND on real
+        # Handoff/Status opportunities), so the rate is a conservative LOWER
+        # BOUND — never label it a generic "Opportunities"/"Rate".
+        print(
+            f"Violations: {rr.violation_count}  "
+            f"agent_runs (denominator): {rr.opportunity_count}  "
+            f"Rate (lower bound): {rate_pct}  "
+            f"Excluded (sanctioned): {rr.excluded_by_exception}"
+        )
+    else:
+        print(
+            f"Violations: {rr.violation_count}  Opportunities: {rr.opportunity_count}  "
+            f"Rate: {rate_pct}  Excluded (sanctioned): {rr.excluded_by_exception}"
+        )
     print()
 
     total = rr.violation_count
@@ -736,7 +920,10 @@ def _print_evidence_text(
     print()
 
     for action in violations:
-        cmd = _sanitize_command_str(action.command)
+        # Fall back to input_summary when there is no command string, so that
+        # cast.db evidence (and Edit/Write/tool_substitution evidence, which
+        # carry a file path in input_summary rather than a command) is not blank.
+        cmd = _sanitize_command_str(action.command or action.input_summary)
         sidechain_str = "sidechain" if action.is_sidechain else "main"
         agent_str = action.agent_type or "main-session"
         print(f"  {action.timestamp}  {cmd[:120]}")
@@ -754,14 +941,23 @@ def _build_evidence_json(
     violations: List[ToolAction],
     config_root_raw: str,
     limit: int,
+    cast_db_result: Optional[CastDbResult] = None,
 ) -> str:
-    """Build deterministic JSON for the evidence command."""
+    """Build deterministic JSON for the evidence command.
+
+    When ``cast_db_result`` is provided (the optional cast.db substrate was
+    engaged and the DB was available), a top-level ``cast_db`` provenance object
+    is included so the agent_runs denominator and the honest under-coverage
+    (``unmapped_by_signal``) are never silently dropped on the evidence surface.
+    """
     output = {
-        "config_root": config_root_raw,
+        "config_root": _display_config_root(config_root_raw),
         "limit": limit,
         "rule": _ranked_rule_to_dict(rr),
         "violations": [_violation_to_dict(a) for a in violations],
     }
+    if cast_db_result is not None:
+        output["cast_db"] = _cast_db_summary(cast_db_result)
     return json.dumps(output, indent=2, sort_keys=True)
 
 
@@ -807,6 +1003,12 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
     actions = iter_tool_actions(projects_dir)
     rule_violations = find_violations(classifications, actions, exceptions=exceptions)
 
+    # OPTIONAL cast.db substrate (default OFF) — lets a --rule prefix drill into
+    # a cast.db-sourced output_shape rule's synthesized violations.
+    rule_violations, cast_db_result = _maybe_augment_with_cast_db(
+        args, classifications, rules_by_id, rule_violations
+    )
+
     if not rule_violations:
         print("No active convertible rules found.", file=sys.stderr)
         return 0
@@ -851,11 +1053,19 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
     capped_violations = target_rv.violations[:limit]
 
     if args.json:
-        print(_build_evidence_json(target_rr, capped_violations, config_root_raw, limit))
+        print(
+            _build_evidence_json(
+                target_rr, capped_violations, config_root_raw, limit, cast_db_result
+            )
+        )
     else:
         _print_evidence_text(
             target_rr, capped_violations, target_rv, config_root_display, limit
         )
+        # Surface cast.db provenance (denominator + honest under-coverage) so it
+        # is never silently dropped on the evidence surface, mirroring rank.
+        if cast_db_result is not None:
+            _print_cast_db_provenance(cast_db_result)
 
     return 0
 
@@ -1017,6 +1227,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="minimum violation count to recommend enforcement (default: 1)",
     )
     rank_parser.add_argument(
+        "--cast-db",
+        dest="cast_db",
+        nargs="?",
+        const=_CASTDB_DEFAULT,
+        default=None,
+        metavar="PATH",
+        help=(
+            "[OPTIONAL, CAST power users] also read output_shape (Handoff / "
+            "Status) violations from a cast.db. Flag absent: cast.db is not "
+            "touched (portable default). Flag with no value: use "
+            "~/.claude/cast.db. Flag with PATH: use that DB. Opened STRICTLY "
+            "read-only."
+        ),
+    )
+    rank_parser.add_argument(
         "--json",
         action="store_true",
         default=False,
@@ -1059,6 +1284,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=20,
         metavar="N",
         help="maximum violating actions to show (default: 20)",
+    )
+    evidence_parser.add_argument(
+        "--cast-db",
+        dest="cast_db",
+        nargs="?",
+        const=_CASTDB_DEFAULT,
+        default=None,
+        metavar="PATH",
+        help=(
+            "[OPTIONAL, CAST power users] include cast.db output_shape "
+            "(Handoff / Status) rules so --rule can drill into their "
+            "violations. Flag absent: cast.db not touched. Flag with no value: "
+            "~/.claude/cast.db. Opened STRICTLY read-only."
+        ),
     )
     evidence_parser.add_argument(
         "--json",

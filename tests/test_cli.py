@@ -687,3 +687,56 @@ def test_find_violations_export_variant_excluded() -> None:
     assert rv.excluded_by_exception == 1, (
         "'export CAST_COMMIT_AGENT=1 && git commit' must be excluded (FIX A)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Privacy regression: ABSOLUTE config_root must be home-collapsed in JSON
+# ---------------------------------------------------------------------------
+#
+# The pre-existing no-PII tests pass a RELATIVE config_root via monkeypatch.chdir,
+# so they never exercised the natural invocation `misfire <cmd> ~/.claude --json`,
+# where the shell expands ~ to an absolute /Users/<name>/.claude that was echoed
+# verbatim into the JSON `config_root` field — a username leak on the primary
+# command. These tests pin the fix (route config_root through _display_config_root).
+# A NON-EXISTENT directory under $HOME is used so the real ~/.claude is never read.
+
+
+def test_display_config_root_collapses_home_absolute() -> None:
+    """_display_config_root home-collapses an absolute path under $HOME."""
+    from misfire.cli import _display_config_root
+
+    out = _display_config_root(str(Path.home() / "some_config_root"))
+    assert out == "~/some_config_root"
+    assert "/Users/" not in out and "/home/" not in out
+
+
+def test_rank_json_absolute_home_config_root_collapsed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """rank --json with an absolute ~-expanded config_root must not leak /Users/<name>/."""
+    import getpass
+
+    abs_home_config = str(Path.home() / "misfire_nonexistent_test_root")
+    ret = main(["rank", abs_home_config, "--projects-dir", str(tmp_path), "--json"])
+    assert ret == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["config_root"] == "~/misfire_nonexistent_test_root"
+    assert f"/Users/{getpass.getuser()}/" not in out
+    assert "/Users/" not in out
+
+
+def test_audit_json_absolute_home_config_root_collapsed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """audit --json with an absolute ~-expanded config_root must not leak /Users/<name>/."""
+    import getpass
+
+    abs_home_config = str(Path.home() / "misfire_nonexistent_test_root")
+    ret = main(["audit", abs_home_config, "--json"])
+    assert ret == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["config_root"] == "~/misfire_nonexistent_test_root"
+    assert f"/Users/{getpass.getuser()}/" not in out
+    assert "/Users/" not in out
