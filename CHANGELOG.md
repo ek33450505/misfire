@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-06-23
+
+### Added
+
+- **`misfire ablate <RULE_ID>`** — opt-in local-Ollama **causal probe**. Re-runs a
+  representative task through a local model with a candidate rule present vs. removed
+  (ablated), N trials each, and measures the shift in how often the model's proposed
+  command violates the rule's predicate (reusing misfire's own structural matcher). This
+  estimates a rule's *marginal* effect — the question passive traces can't answer (an
+  obeyed rule and a never-triggered rule both show zero violations). stdlib-only (a thin
+  `urllib` client behind an injectable `ChatClient`); the deterministic core is unchanged
+  and CI never calls a live model. Evidence only — never auto-applies or auto-deletes, and
+  a zero/negative shift is never a deletion recommendation.
+
+### Changed
+
+- CI now runs the BATS suite (`tests/bats/`) in addition to the pytest matrix.
+
+### Fixed
+
+- `proof/README.md`: the cast.db reproduce step is now idempotent (`rm -f generated.db`
+  before rebuilding from `seed.sql`).
+
 ## [0.1.0] — 2026-06-23
 
 First public release. misfire is a deterministic, local-first, stdlib-only CLI and
@@ -43,4 +66,5 @@ and never writes `settings.json`.
   end-to-end BATS test that installs a generated hook and confirms it blocks the
   violated command.
 
+[0.2.0]: https://github.com/ek33450505/misfire/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ek33450505/misfire/releases/tag/v0.1.0

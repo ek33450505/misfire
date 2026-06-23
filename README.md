@@ -49,6 +49,12 @@ Four commands, each with a deterministic `--json` mode (sorted keys, byte-stable
 | `evidence`| Shows the per-rule violation detail behind a ranking — the actual tool actions that violated a rule. |
 | `convert` | Scaffolds a deterministic PreToolUse/PostToolUse hook for the violated convertible subset, prints it plus a `settings.json` snippet for you to review, and writes nothing. |
 
+Plus one **opt-in, non-deterministic** command, off the default path:
+
+| Command  | What it does |
+|----------|--------------|
+| `ablate` | **[opt-in; requires a running local Ollama]** Causal probe — re-runs a representative task with a candidate rule present vs. removed (ablated) and measures the shift in how often a local model violates the rule. Estimates a rule's *marginal* effect, which passive traces can't (an obeyed rule and a never-triggered rule both show zero violations). Evidence only — never auto-applies or auto-deletes. |
+
 Observer exit codes: every command exits `0` regardless of findings. The only non-zero
 exit is `evidence` or `convert` invoked with an explicit `--rule PREFIX` that matches no
 rule (exit `1`).
