@@ -74,6 +74,11 @@ RUNG_ENFORCE = "enforce"
 EVENT_PRE = "PreToolUse"
 EVENT_POST = "PostToolUse"
 
+# Matcher for path-guard hooks: ALL file-mutating tools, not just Edit/Write.
+# A Claude Code matcher selects by exact tool name (anchored regex OR), so
+# MultiEdit / NotebookEdit must be enumerated explicitly or they slip through.
+_EDITWRITE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit"
+
 # Documented, stable hook events misfire is willing to target deterministically.
 # Used by event_support_note for the version feature-detection advisory.
 STABLE_EVENTS = frozenset(
@@ -390,15 +395,21 @@ _EMIT_POST = """decision = {"decision": "block", "reason": REASON}
 
 
 def _render(template: str, replacements: Dict[str, str]) -> str:
-    """Replace ``__SENTINEL__`` tokens in *template*.
+    """Replace ``__SENTINEL__`` tokens in *template* in a SINGLE pass.
 
-    Sentinel replacement (not ``str.format``) avoids escaping every ``{`` / ``}``
-    in the embedded JSON-emitting code.
+    Single-pass ``re.sub`` (not sequential ``str.replace``) so that an inserted
+    value which happens to contain another sentinel token — e.g. a rule excerpt
+    that literally mentions ``__MATCHER_SRC__`` — is NEVER re-expanded.  Sentinel
+    replacement (not ``str.format``) avoids escaping every ``{`` / ``}`` in the
+    embedded JSON-emitting code.
+
+    Longer tokens are matched first so no sentinel can shadow another by prefix.
     """
-    out = template
-    for token, value in replacements.items():
-        out = out.replace(token, value)
-    return out
+    if not replacements:
+        return template
+    keys = sorted(replacements, key=len, reverse=True)
+    pattern = re.compile("|".join(re.escape(k) for k in keys))
+    return pattern.sub(lambda m: replacements[m.group(0)], template)
 
 
 # ---------------------------------------------------------------------------
@@ -411,8 +422,10 @@ def _deny_reason(classification: Classification, excerpt: str) -> str:
     safe_excerpt = _safe_comment(excerpt, limit=160) if excerpt else ""
     predicate = classification.predicate or {}
     if classification.convert_kind == CONVERT_TOOL_SUBSTITUTION:
-        prefer = predicate.get("prefer", "the preferred tool")
-        forbidden = predicate.get("forbidden", "this command")
+        # Sanitize defensively: keep this artifact's PII guarantee self-contained
+        # rather than relying on an upstream module's input validation.
+        prefer = _sanitize(predicate.get("prefer", "the preferred tool"))
+        forbidden = _sanitize(predicate.get("forbidden", "this command"))
         base = f"Use `{prefer}` instead of `{forbidden}` (misfire-generated)."
     else:
         base = "Blocked by your rule (misfire-generated)."
@@ -481,11 +494,16 @@ def _build_bash_enforce(
         "main",
         "master",
     ):
-        parts.append('re.search(r"\\b(main|master)\\b", command)')
+        # Match main/master only as a delimited push target (preceded by
+        # whitespace or ':' refspec, followed by whitespace/end) — so a branch
+        # NAME like 'my-main-feature' or 'feature/master-plan' is NOT matched.
+        parts.append('re.search(r"(?:^|[\\s:])(?:main|master)(?=$|\\s)", command)')
         caveats.append(
-            "Branch-scoped: this hook can only block a push when 'main'/'master' "
-            "appears in the command. A push from a checked-out main branch with no "
-            "branch argument is NOT detected — keep the prose rule too."
+            "Branch-scoped & best-effort: blocks a push only when 'main'/'master' "
+            "appears as a delimited push target. It may MISS a push from a "
+            "checked-out main branch with no branch argument, and may OVER-block "
+            "a command that mentions main/master elsewhere (e.g. a trailing "
+            "comment). Keep the prose rule too."
         )
 
     # Escape-hatch exemption: do not block a command the rule itself sanctions.
@@ -553,12 +571,14 @@ def _build_editwrite_enforce(
         rung=RUNG_ENFORCE,
         convert_kind=CONVERT_NEVER_COMMAND,
         event=EVENT_PRE,
-        matcher="Edit|Write",
+        matcher=_EDITWRITE_MATCHER,
         hook_filename=filename,
         hook_script=script,
-        settings_snippet=_settings_snippet(EVENT_PRE, "Edit|Write", filename),
+        settings_snippet=_settings_snippet(EVENT_PRE, _EDITWRITE_MATCHER, filename),
         reason=reason,
         caveats=(
+            "Covers Edit, Write, MultiEdit, and NotebookEdit against the target "
+            "path.",
             "Path guard uses a substring match on the edited file path; tune "
             "PATH_MATCH if it is too broad or too narrow.",
         ),

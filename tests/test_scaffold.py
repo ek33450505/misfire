@@ -15,6 +15,7 @@ Stdlib + pytest only. No network, no DB.
 from __future__ import annotations
 
 import json
+import py_compile
 import re
 import subprocess
 import sys
@@ -23,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from misfire import match
+from misfire import scaffold as scaffold_mod
 from misfire.classify import (
     CATEGORY_CONVERTIBLE,
     CATEGORY_JUDGMENT_KEEP,
@@ -88,6 +90,17 @@ def tempfile_mkdtemp() -> str:
     import tempfile
 
     return tempfile.mkdtemp()
+
+
+def _compiles(script: str) -> bool:
+    """True iff *script* is syntactically valid Python (catches codegen bugs)."""
+    p = Path(tempfile_mkdtemp()) / "h.py"
+    p.write_text(script, encoding="utf-8")
+    try:
+        py_compile.compile(str(p), doraise=True)
+        return True
+    except py_compile.PyCompileError:
+        return False
 
 
 def _denied(stdout: str) -> bool:
@@ -211,10 +224,19 @@ def test_never_command_editwrite_shape_and_runtime() -> None:
     )
     sc = scaffold_hook(cl, "Never touch settings.json")
     assert sc.rung == RUNG_ENFORCE
-    assert sc.matcher == "Edit|Write"
-    assert sc.settings_snippet["hooks"]["PreToolUse"][0]["matcher"] == "Edit|Write"
-    # runtime: blocks an Edit on the matching path
+    # matcher must register ALL four file-mutating tools the script handles —
+    # not just Edit|Write — or MultiEdit/NotebookEdit silently slip through.
+    assert sc.matcher == "Edit|Write|MultiEdit|NotebookEdit"
+    assert (
+        sc.settings_snippet["hooks"]["PreToolUse"][0]["matcher"]
+        == "Edit|Write|MultiEdit|NotebookEdit"
+    )
+    # runtime: blocks Write/Edit/MultiEdit (file_path) and NotebookEdit (notebook_path)
     _, out = _run_hook(sc.hook_script, {"tool_name": "Write", "tool_input": {"file_path": "/a/settings.json"}})
+    assert _denied(out)
+    _, out = _run_hook(sc.hook_script, {"tool_name": "MultiEdit", "tool_input": {"file_path": "/a/settings.json"}})
+    assert _denied(out)
+    _, out = _run_hook(sc.hook_script, {"tool_name": "NotebookEdit", "tool_input": {"notebook_path": "/a/settings.json"}})
     assert _denied(out)
     # allows an unrelated path
     _, out = _run_hook(sc.hook_script, {"tool_name": "Edit", "tool_input": {"file_path": "/a/main.py"}})
@@ -257,12 +279,20 @@ def test_never_push_main_branch_guard() -> None:
     )
     sc = scaffold_hook(cl, "Never push to main")
     assert any("Branch-scoped" in c for c in sc.caveats)
-    # denies push that names main
-    _, out = _run_hook(sc.hook_script, {"tool_name": "Bash", "tool_input": {"command": "git push origin main"}})
-    assert _denied(out)
-    # does NOT deny a push with no branch token (documented limitation)
-    _, out = _run_hook(sc.hook_script, {"tool_name": "Bash", "tool_input": {"command": "git push"}})
-    assert not _denied(out)
+
+    def denies(cmd: str) -> bool:
+        _, out = _run_hook(sc.hook_script, {"tool_name": "Bash", "tool_input": {"command": cmd}})
+        return _denied(out)
+
+    # denies a push that targets main/master as a delimited arg or refspec
+    assert denies("git push origin main")
+    assert denies("git push origin HEAD:main")
+    assert denies("git push origin master --force")
+    # does NOT over-block a branch NAME that merely contains main/master
+    assert not denies("git push origin my-main-feature")
+    assert not denies("git push origin feature/master-plan")
+    # does NOT deny a push with no branch token (documented under-block limitation)
+    assert not denies("git push")
 
 
 # ---------------------------------------------------------------------------
@@ -300,8 +330,10 @@ def test_before_action_skeleton() -> None:
     assert sc.event == EVENT_PRE
     assert any("No violation evidence" in c for c in sc.caveats)
     assert "TODO" in sc.hook_script
-    # a skeleton never blocks until completed (violated = False)
-    _, out = _run_hook(sc.hook_script, {"tool_name": "Bash", "tool_input": {"command": "git commit"}})
+    assert _compiles(sc.hook_script)
+    # a skeleton never blocks until completed (violated = False) and exits cleanly
+    rc, out = _run_hook(sc.hook_script, {"tool_name": "Bash", "tool_input": {"command": "git commit"}})
+    assert rc == 0
     assert not _denied(out)
 
 
@@ -316,6 +348,12 @@ def test_after_action_skeleton_is_posttooluse() -> None:
     assert sc.event == EVENT_POST
     assert "PostToolUse" in sc.settings_snippet["hooks"]
     assert '"decision": "block"' in sc.hook_script
+    # the indentation-sensitive _EMIT_POST sentinel must yield valid Python and
+    # run cleanly as a PostToolUse hook (rc 0, no block until completed).
+    assert _compiles(sc.hook_script)
+    rc, out = _run_hook(sc.hook_script, {"tool_name": "Edit", "tool_input": {"file_path": "/a/x.py"}})
+    assert rc == 0
+    assert '"decision": "block"' not in out
 
 
 # ---------------------------------------------------------------------------
@@ -393,3 +431,38 @@ def test_event_support_note() -> None:
     assert "Could not detect" in event_support_note("PreToolUse", None)
     # non-stable event → advisory regardless of version
     assert "outside misfire's documented-stable set" in event_support_note("ZorpToolUse", "2.1.170")
+
+
+def test_detect_version_subprocess_branch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runner=None path parses `claude --version` stdout (no real subprocess)."""
+    import types
+
+    monkeypatch.setattr(
+        scaffold_mod.subprocess,
+        "run",
+        lambda *a, **k: types.SimpleNamespace(stdout="2.1.170 (Claude Code)\n", returncode=0),
+    )
+    assert detect_claude_version() == "2.1.170"
+
+
+def test_detect_version_subprocess_failure_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a, **k):
+        raise FileNotFoundError("claude")
+
+    monkeypatch.setattr(scaffold_mod.subprocess, "run", boom)
+    assert detect_claude_version() is None
+
+
+# ---------------------------------------------------------------------------
+# template robustness — sentinel self-injection
+# ---------------------------------------------------------------------------
+
+
+def test_render_sentinel_injection_safe() -> None:
+    """A rule excerpt containing an internal sentinel must not corrupt the hook."""
+    cl = _mk(CATEGORY_CONVERTIBLE, CONVERT_NEVER_COMMAND, {"tool": "Bash", "match": "git commit"})
+    sc = scaffold_hook(cl, "rule mentions __MATCHER_SRC__ and __CONDITION__ and __REASON_REPR__")
+    assert _compiles(sc.hook_script), "sentinel in excerpt must not break codegen"
+    # and the hook still functions
+    _, out = _run_hook(sc.hook_script, {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}})
+    assert _denied(out)

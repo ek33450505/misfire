@@ -61,7 +61,10 @@ def test_proof_convert_matches_expected_json(
         "If fixtures or scaffold/convert logic changed intentionally, regenerate:\n"
         "  cd <repo-root> && misfire convert proof/evidence-sample/config "
         "--projects-dir proof/evidence-sample/projects --top --json "
-        "> proof/expected_convert.json"
+        "> proof/expected_convert.json\n"
+        "NOTE: the emitted hook embeds match.py's _strip_quoted_spans / "
+        "command_invokes via inspect.getsource — editing those functions (even "
+        "their docstrings/whitespace) changes this golden and requires a regen."
     )
 
 
@@ -75,6 +78,9 @@ def test_proof_convert_shape() -> None:
     assert data["hook"]["is_skeleton"] is False
     cmd = data["hook"]["settings_snippet"]["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     assert cmd.startswith("${CLAUDE_PROJECT_DIR}/")
+    # escape hatch quoted faithfully (raw_text source), never markdown-mangled
+    assert "CAST_COMMIT_AGENT=1" in data["hook"]["script"]
+    assert "CASTCOMMITAGENT" not in data["hook"]["script"]
 
 
 def test_proof_convert_hook_denies_git_commit(tmp_path: Path) -> None:

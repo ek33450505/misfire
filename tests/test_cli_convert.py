@@ -191,6 +191,9 @@ def test_convert_json_has_no_pii(capsys, monkeypatch) -> None:
 
 def test_convert_text_mode_renders(capsys, monkeypatch) -> None:
     monkeypatch.chdir(_REPO_ROOT)
+    # Hermetic: stub version detection so the test never spawns a real
+    # `claude --version` subprocess (the advisory goes to stderr regardless).
+    monkeypatch.setattr("misfire.cli.detect_claude_version", lambda *a, **k: "9.9.9")
     rc = main(["convert", _EV_CONFIG, "--projects-dir", _EV_PROJECTS, "--top"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -198,6 +201,45 @@ def test_convert_text_mode_renders(capsys, monkeypatch) -> None:
     assert "Verdict: ENFORCE" in out
     assert "PreToolUse" in out
     assert "settings.json (merge this" in out
+
+
+def test_convert_reason_quotes_escape_hatch_faithfully(capsys, monkeypatch) -> None:
+    """Regression: the deny reason/hook must quote the rule's escape hatch with
+    underscores intact (raw_text source), never the markdown-mangled form."""
+    rc, d, _ = _json_run(
+        capsys, monkeypatch, ["convert", _EV_CONFIG, "--projects-dir", _EV_PROJECTS, "--top", "--json"]
+    )
+    assert rc == 0
+    script = d["hook"]["script"]
+    assert "CASTCOMMITAGENT" not in script  # the mangled form must never appear
+    assert "CAST_COMMIT_AGENT=1" in script  # faithful hatch (EXCEPTION + caveat)
+    assert "CASTCOMMITAGENT" not in d["rule"]["excerpt"]
+
+
+def test_tool_substitution_escape_hatch_reachable() -> None:
+    """A tool_substitution rule's escape hatch is extracted (not never_command-only)."""
+    from misfire.cli import _extract_exceptions
+    from misfire.classify import (
+        CATEGORY_CONVERTIBLE,
+        Classification,
+        CONVERT_TOOL_SUBSTITUTION,
+    )
+    from misfire.parse import Rule
+
+    rid = "abc123abc123"
+    raw = "Use `rg` not `grep` (exception: `LEGACY_GREP=1 grep`)."
+    rule = Rule(rid, "/x", "x", "user", "", 1, 1, raw, "Use rg not grep", True)
+    cl = Classification(
+        rid,
+        CATEGORY_CONVERTIBLE,
+        CONVERT_TOOL_SUBSTITUTION,
+        {"tool": "Bash", "forbidden": "grep", "prefer": "rg"},
+        False,
+        "high",
+        "t",
+    )
+    exc = _extract_exceptions([cl], {rid: rule})
+    assert exc.get(rid) == "LEGACY_GREP=1"
 
 
 # ---------------------------------------------------------------------------

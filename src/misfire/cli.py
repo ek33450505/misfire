@@ -57,6 +57,7 @@ from misfire.classify import (
     CATEGORY_CONVERTIBLE,
     Classification,
     CONVERT_NEVER_COMMAND,
+    CONVERT_TOOL_SUBSTITUTION,
     classify_rules,
 )
 from misfire.evidence import ToolAction
@@ -405,10 +406,11 @@ def _extract_exceptions(
     classifications: List[Classification],
     rules_by_id: Dict[str, Rule],
 ) -> Dict[str, str]:
-    """Extract escape-hatch exception markers from never_command rule raw texts.
+    """Extract escape-hatch exception markers from convertible rule raw texts.
 
-    Scans the ``raw_text`` (backtick-aware) of each ``never_command``
-    convertible rule for a clearly-stated escape hatch that names a literal
+    Scans the ``raw_text`` (backtick-aware) of each ``never_command`` or
+    ``tool_substitution`` convertible rule for a clearly-stated escape hatch
+    that names a literal
     marker in backticks.  The extracted marker is refined to its most
     distinctive token (FIX A: env-var token preferred over the full span so
     that ``export VAR=1 && git commit`` variants are also caught).
@@ -429,11 +431,17 @@ def _extract_exceptions(
     predicate_match_for: Dict[str, str] = {}  # rule_id → predicate["match"]
 
     for cl in classifications:
-        if cl.category != CATEGORY_CONVERTIBLE or cl.convert_kind != CONVERT_NEVER_COMMAND:
+        if cl.category != CATEGORY_CONVERTIBLE or cl.convert_kind not in (
+            CONVERT_NEVER_COMMAND,
+            CONVERT_TOOL_SUBSTITUTION,
+        ):
             continue
         if cl.predicate is None:
             continue
-        pred_match = cl.predicate.get("match", "")
+        # never_command predicates carry "match"; tool_substitution carry "forbidden".
+        # Honoring the hatch for both keeps violation accounting AND the generated
+        # hook from penalizing usage the rule itself sanctions.
+        pred_match = cl.predicate.get("match") or cl.predicate.get("forbidden", "")
         predicate_match_for[cl.rule_id] = pred_match
 
         rule = rules_by_id.get(cl.rule_id)
@@ -1084,12 +1092,29 @@ _STATUS_ENFORCE = "enforce"
 _STATUS_NOTHING = "nothing_to_convert"
 
 
-def _convert_excerpt(text: str, limit: int = 100) -> str:
-    """Sanitized, truncated rule text for display (no ``/Users/<name>/`` leak)."""
-    sanitized = _sanitize_command_str(text)
-    if len(sanitized) > limit:
-        return sanitized[: limit - 1] + "…"
-    return sanitized
+# Leading markdown marker (bullet / numbered / heading / blockquote) to strip
+# from a faithful excerpt.
+_LEADING_MARKER_RE = re.compile(r"^\s*(?:[-*+]|\d+\.|#{1,6}|>)\s*")
+
+
+def _faithful_excerpt(raw_text: str, limit: int = 100) -> str:
+    """Faithful, sanitized, truncated rule text for display + the deny reason.
+
+    Sourced from ``Rule.raw_text`` (NOT ``normalized_text``) so identifiers like
+    ``CAST_COMMIT_AGENT=1`` survive intact — the deny reason a blocked user reads
+    must quote the rule and its escape hatch correctly.  (``normalized_text``'s
+    markdown italic-strip eats the underscores in snake_case, turning
+    ``CAST_COMMIT_AGENT`` into ``CASTCOMMITAGENT`` — wrong remediation in the one
+    place it matters.)  Strips a leading markdown marker and backticks, collapses
+    whitespace, and removes any home path (no ``/Users/<name>/`` leak).
+    """
+    text = _LEADING_MARKER_RE.sub("", raw_text)
+    text = text.replace("`", "")
+    text = _sanitize_command_str(text)
+    text = " ".join(text.split())
+    if len(text) > limit:
+        return text[: limit - 1] + "…"
+    return text
 
 
 def _is_recommended(rr: Optional[RankedRule]) -> bool:
@@ -1177,7 +1202,7 @@ def _convert_result_dict(
     hook = _scaffold_to_hook_dict(sc)
     rule_dict = {
         "convert_kind": sc.convert_kind,
-        "excerpt": _convert_excerpt(rule.normalized_text),
+        "excerpt": _faithful_excerpt(rule.raw_text),
         "rule_id": rule.rule_id,
         "rung": sc.rung,
         "source_rel": rule.source_rel,
@@ -1357,7 +1382,7 @@ def _cmd_convert(args: argparse.Namespace) -> int:
 
     rr = ranked_by_id.get(target_cl.rule_id)
     marker = exceptions.get(target_cl.rule_id, "")
-    sc = scaffold_hook(target_cl, target_rule.normalized_text, marker)
+    sc = scaffold_hook(target_cl, _faithful_excerpt(target_rule.raw_text), marker)
     recommended = _is_recommended(rr)
     note = _convert_honesty_note(sc, rr)
     result = _convert_result_dict(
