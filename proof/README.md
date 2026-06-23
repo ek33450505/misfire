@@ -146,6 +146,61 @@ substrings.
 
 ---
 
+## Phase 3 — Convert-to-hook Proof
+
+This proves the wedge end-to-end: from the **evidence** for a rule your agents
+demonstrably ignore, misfire emits a deterministic hook that actually enforces
+it — reusing the same portable `evidence-sample` fixture (no DB, no PII).
+
+### Reproduce in one command
+
+From the repo root:
+
+```sh
+misfire convert proof/evidence-sample/config \
+    --projects-dir proof/evidence-sample/projects --top --json
+```
+
+The output must match `proof/expected_convert.json` byte-for-byte.
+`tests/test_proof_convert.py` asserts this on every run.
+
+### What the fixture exercises
+
+`misfire convert --top` runs the full pipeline (parse → classify → rank) and
+selects the **top evidence-grounded `enforce_candidate`** — here the
+`never git commit` rule (5 violations / 35 opportunities). For it, misfire emits:
+
+- a self-contained `PreToolUse` hook script that **embeds misfire's own
+  structural matcher** (so a quoted `echo "git commit"` is NOT blocked — no
+  naive-substring false positive),
+- the hook **honors the rule's escape hatch** (`CAST_COMMIT_AGENT=1`), matching
+  misfire's violation accounting,
+- the `settings.json` registration snippet (using `${CLAUDE_PROJECT_DIR}`).
+
+misfire **never writes `settings.json`** — the scaffold is printed for review.
+
+### Honesty guard (observer posture)
+
+- `misfire convert --rule <safety|judgment rule>` → **KEEP** verdict, no hook.
+- `misfire convert --rule <convertible rule with 0 observed violations>` →
+  `recommended: false`, shown for reference only.
+- `misfire convert --top` with no qualifying rule → **nothing to convert**.
+
+(Covered by `tests/test_cli_convert.py` and `tests/test_scaffold.py`.)
+
+### Strongest proof — the installed hook blocks `git commit` (BATS)
+
+`tests/bats/convert_blocks_commit.bats` installs the emitted hook (executable,
+with its shebang) into an **isolated temp HOME** and drives it with the **real
+PreToolUse stdin contract**. It asserts the installed hook denies `git commit`,
+allows `git status`, ignores a quoted occurrence, and honors the escape hatch:
+
+```sh
+bats tests/bats/convert_blocks_commit.bats
+```
+
+---
+
 ## No database required (core)
 
 The Phase 1 and Phase 2 (transcript) proofs are purely static or
