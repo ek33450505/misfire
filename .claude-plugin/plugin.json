@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin.json",
+  "name": "misfire",
+  "displayName": "misfire — trace-grounded CLAUDE.md adherence auditor",
+  "version": "0.1.0",
+  "description": "Tells you which of your existing CLAUDE.md / .claude/rules prose rules your agents demonstrably ignore, ranked from your own run history, and scaffolds a deterministic hook for the violated convertible subset — keeping safety rules as prose. Deterministic, zero-LLM, observer-only: never auto-deletes, never auto-applies, never writes settings.json.",
+  "author": { "name": "Edward Kubiak", "url": "https://github.com/ek33450505" },
+  "homepage": "https://github.com/ek33450505/misfire",
+  "repository": "https://github.com/ek33450505/misfire",
+  "license": "Apache-2.0",
+  "keywords": ["claude-code", "claude-md", "adherence", "hooks", "audit", "agent-reliability", "deterministic"],
+  "defaultEnabled": false
+}
