@@ -15,7 +15,7 @@
       },
       "recommendation": "enforce_candidate",
       "rule_excerpt": "MANDATORY: Never use raw git commit directly \u2014 always route through the commit agent. Escape hatch \u2026",
-      "rule_id": "e416dad0ebe8",
+      "rule_id": "d84c9954a86f",
       "source_rel": "CLAUDE.md",
       "violation_count": 5,
       "violation_rate": 0.14285714285714285

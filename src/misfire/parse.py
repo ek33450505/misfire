@@ -193,10 +193,12 @@ def normalize_markdown(text: str) -> str:
     text = re.sub(r"^>\s?", "", text, flags=re.MULTILINE)
     # 5. Bold
     text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
-    text = re.sub(r"__([^_]+)__", r"\1", text)
-    # 6. Italic
+    text = re.sub(r"(?<!\w)__([^_]+)__(?!\w)", r"\1", text)
+    # 6. Italic.  Underscore emphasis only at word boundaries — so intraword
+    # snake_case identifiers (e.g. CAST_COMMIT_AGENT, NEEDS_CONTEXT) keep their
+    # underscores instead of being mangled to CASTCOMMITAGENT / NEEDSCONTEXT.
     text = re.sub(r"\*([^*]+)\*", r"\1", text)
-    text = re.sub(r"_([^_]+)_", r"\1", text)
+    text = re.sub(r"(?<!\w)_([^_]+)_(?!\w)", r"\1", text)
     # 7. Bullet markers (at line start, optional leading whitespace)
     text = re.sub(r"^[ \t]*[-*+]\s+", "", text, flags=re.MULTILINE)
     text = re.sub(r"^[ \t]*\d+\.\s+", "", text, flags=re.MULTILINE)
