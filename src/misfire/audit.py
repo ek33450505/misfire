@@ -25,6 +25,9 @@ Conservative stale-path rules (all must hold to flag a token):
    — resolving them against the source file dir caused cross-repo FPs.
 2. Token has NO placeholder characters (``<``, ``>``, ``{``, ``}``, ``*``,
    ``?``) — those are template variables, glob patterns, or examples.
+   Additionally, ``_ABS_PATH_RE`` excludes ``/``-tokens immediately preceded
+   by ``>`` or ``}`` (placeholder-close chars) so path fragments like
+   ``/memory/_pending`` extracted from ``<id>/memory/...`` are never emitted.
 3. Token can be resolved to a filesystem path without ambiguity.
 4. ``os.stat()`` raises ``FileNotFoundError`` or ``NotADirectoryError``
    (confirmed missing). ``PermissionError`` or any other ``OSError``
@@ -139,9 +142,16 @@ def _path_definitively_missing(path: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 # Absolute paths: /something (must have at least one component after /)
-# Negative lookbehind excludes backtick, word chars, AND tilde (~) so that
-# ~/foo does not also emit a tilde-less /.claude/... duplicate.
-_ABS_PATH_RE = re.compile(r"(?<![`\w~])(/[\w][\w./-]*)")
+# Negative lookbehind excludes:
+#   `     — backtick (already captured by _BACKTICK_PATH_RE; avoids duplicates)
+#   \w    — word chars (a-zA-Z0-9_): /foo preceded by a word char is a path
+#           COMPONENT, not a root reference (e.g. "projects/<id>/memory")
+#   ~     — tilde: ~/foo must NOT also emit a tilde-less /.claude/... duplicate
+#   > }   — placeholder-close chars: a /token immediately following <id> or
+#           {var} is a FRAGMENT of the placeholder path, not a real reference
+#           (e.g. "~/.claude/projects/<id>/memory/_pending" → _ABS_PATH_RE
+#           must not extract "/memory/_pending" from the ">/" boundary).
+_ABS_PATH_RE = re.compile(r"(?<![`\w~>}])(/[\w][\w./-]*)")
 
 # Home-relative paths: ~/something
 _HOME_PATH_RE = re.compile(r"(~/[\w./-]+)")
@@ -159,6 +169,35 @@ _FENCE_RE = re.compile(r"```[\s\S]*?```|~~~[\s\S]*?~~~")
 
 # Placeholder characters that mark template/glob tokens — never real paths.
 _PLACEHOLDER_RE = re.compile(r"[<>{}\*\?]")
+
+# Date/time TEMPLATE signature — tokens containing these are filename PATTERNS,
+# not real filesystem paths.  Conservative: only fire on unambiguous date
+# template markers.
+#
+#   (?i:YYYY)              — four consecutive Y (case-insensitive)
+#   %[YmdHMSjy]           — strftime percent-codes: %Y %m %d %H %M %S %j %y
+#   MM[/_-]DD|DD[/_-]MM   — adjacent month/day template parts (e.g. MM-DD, DD/MM)
+_DATE_TEMPLATE_RE = re.compile(
+    r"(?i:YYYY)"
+    r"|%[YmdHMSjy]"
+    r"|(?:MM[/_-]DD|DD[/_-]MM)",
+)
+
+
+def _is_template_token(token: str) -> bool:
+    """Return True when *token* contains a date/time TEMPLATE signature.
+
+    Detected patterns (conservative — only clear template markers):
+
+    - ``YYYY`` (four consecutive Y, case-insensitive) — year placeholder.
+    - strftime percent-codes: ``%Y %m %d %H %M %S %j %y``.
+    - Adjacent month/day template parts: ``MM-DD``, ``DD/MM``, ``MM_DD``, etc.
+
+    Used to skip tokens like ``YYYY-MM/YYYY-MM-DD.md`` that are filename
+    PATTERNS, not real filesystem paths.  Only match clear date-template
+    signatures — do NOT match arbitrary uppercase sequences.
+    """
+    return bool(_DATE_TEMPLATE_RE.search(token))
 
 
 def _strip_urls(text: str) -> str:
@@ -196,7 +235,7 @@ def _extract_path_tokens(text: str) -> List[str]:
 
     def _add(tok: str) -> None:
         tok = tok.rstrip(".,;)'\"")
-        if tok and tok not in seen and not _has_placeholder(tok):
+        if tok and tok not in seen and not _has_placeholder(tok) and not _is_template_token(tok):
             seen.add(tok)
             candidates.append(tok)
 
@@ -256,7 +295,9 @@ def audit_stale_paths(
     Conservative rules (ALL must hold to produce a finding):
     - Token is absolute or home-relative (bare-relative → skipped unless
       ``base_dir`` is explicitly provided by the caller).
-    - Token has no placeholder/glob metacharacters.
+    - Token has no placeholder/glob metacharacters (``<``, ``>``, etc.).
+    - Token is not a date/time template (``YYYY-MM-DD``, strftime codes,
+      ``MM-DD`` / ``DD-MM`` pairs) — see ``_is_template_token``.
     - ``os.stat()`` raises ``FileNotFoundError`` or ``NotADirectoryError``
       (PermissionError and other OSError → unknown, NOT flagged).
     """

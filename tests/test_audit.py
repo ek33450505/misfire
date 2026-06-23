@@ -42,6 +42,7 @@ from misfire.audit import (
     SEVERITY_INFO,
     SEVERITY_WARN,
     _extract_path_tokens,
+    _is_template_token,
     _path_definitively_missing,
     audit_all,
     audit_conflicts,
@@ -605,3 +606,135 @@ class TestAuditAll:
             assert home_bare not in f.source_rel or f.source_rel.startswith("~/"), (
                 f"source_rel leaks home path: {f.source_rel!r}"
             )
+
+
+# ===========================================================================
+# Unit tests for _is_template_token (FIX A helper)
+# ===========================================================================
+
+
+class TestIsTemplateToken:
+    """_is_template_token must fire on clear date-template patterns only."""
+
+    def test_yyyy_true(self) -> None:
+        """Four consecutive Y (case-insensitive) → True."""
+        assert _is_template_token("YYYY-MM-DD")
+        assert _is_template_token("yyyy-mm-dd")  # lowercase
+        assert _is_template_token("~/Documents/Claude/YYYY-MM/YYYY-MM-DD.md")
+
+    def test_strftime_code_true(self) -> None:
+        """strftime percent-codes → True."""
+        assert _is_template_token("%Y/%m")
+        assert _is_template_token("~/logs/%Y-%m-%d.log")
+        assert _is_template_token("%H:%M:%S")
+
+    def test_mm_dd_pattern_true(self) -> None:
+        """Adjacent MM-DD / DD/MM template parts → True."""
+        assert _is_template_token("MM-DD")
+        assert _is_template_token("DD/MM")
+        assert _is_template_token("MM_DD")
+        assert _is_template_token("DD-MM")
+
+    def test_normal_path_false(self) -> None:
+        """Normal path tokens must NOT be mistaken for date templates."""
+        assert not _is_template_token("scripts/deploy.sh")
+        assert not _is_template_token("MEMORY.md")
+        assert not _is_template_token("cast-cost-optimization.md")
+        assert not _is_template_token("~/.claude/rules/")
+        assert not _is_template_token("/etc/hosts")
+        # "MM" or "DD" in isolation — must require adjacency with the counterpart
+        assert not _is_template_token("summary.md")
+        assert not _is_template_token("README.md")
+
+
+# ===========================================================================
+# Integration tests for FIX A + FIX B (false-positive reduction)
+# ===========================================================================
+
+
+class TestFalsePositiveFixes:
+    """audit_stale_paths must not emit findings for the two suppressed FP classes."""
+
+    # ------------------------------------------------------------------
+    # FIX A — date-template tokens (_is_template_token / _DATE_TEMPLATE_RE)
+    # ------------------------------------------------------------------
+
+    def test_date_template_yyyy_not_flagged(self, tmp_path: Path) -> None:
+        """YYYY-MM/YYYY-MM-DD.md is a filename PATTERN — must NOT be flagged."""
+        config_root = _make_config(
+            tmp_path,
+            "- Journal file: `~/Documents/Claude/YYYY-MM/YYYY-MM-DD.md`\n",
+        )
+        pr = parse_config(config_root)
+        findings = audit_stale_paths(pr)
+        stale = _findings_of_kind(findings, KIND_STALE_PATH)
+        date_template_finds = [
+            f for f in stale if "YYYY" in f.detail.get("token", "")
+        ]
+        assert not date_template_finds, (
+            "Date-template token YYYY-MM-DD must not produce a stale_path finding"
+        )
+
+    def test_strftime_token_not_flagged(self, tmp_path: Path) -> None:
+        """Backtick-wrapped strftime path must NOT be flagged as stale."""
+        config_root = _make_config(
+            tmp_path,
+            "- Store logs at `~/logs/%Y-%m-%d.log` for rotation\n",
+        )
+        pr = parse_config(config_root)
+        findings = audit_stale_paths(pr)
+        stale = _findings_of_kind(findings, KIND_STALE_PATH)
+        strftime_finds = [f for f in stale if "%Y" in f.detail.get("token", "")]
+        assert not strftime_finds, (
+            "Strftime token %Y-%m-%d must not produce a stale_path finding"
+        )
+
+    # ------------------------------------------------------------------
+    # FIX B — placeholder fragments (_ABS_PATH_RE lookbehind excludes > and })
+    # ------------------------------------------------------------------
+
+    def test_placeholder_fragment_pending_not_flagged(self, tmp_path: Path) -> None:
+        """The /memory/_pending fragment from a placeholder path is NOT flagged.
+
+        Raw text: write to `~/.claude/projects/<id>/memory/_pending/<file>.md`
+
+        Without the fix, _ABS_PATH_RE would extract /memory/_pending from the
+        ">/" boundary (the ``>`` that closes ``<id>`` preceded the ``/``).
+        The fix adds ``>`` and ``}`` to the lookbehind so a /token immediately
+        following a placeholder-close char is not extracted as an absolute path.
+        """
+        config_root = _make_config(
+            tmp_path,
+            "write to `~/.claude/projects/<id>/memory/_pending/<file>.md` instead\n",
+        )
+        pr = parse_config(config_root)
+        findings = audit_stale_paths(pr)
+        stale = _findings_of_kind(findings, KIND_STALE_PATH)
+        pending_finds = [
+            f for f in stale if "_pending" in f.detail.get("token", "")
+        ]
+        assert not pending_finds, (
+            "Placeholder-fragment /memory/_pending must NOT produce a stale_path finding; "
+            f"got: {pending_finds}"
+        )
+
+    # ------------------------------------------------------------------
+    # REGRESSION GUARD — ensure suppression is surgical (no false negatives)
+    # ------------------------------------------------------------------
+
+    def test_missing_home_path_still_flagged(self, tmp_path: Path) -> None:
+        """A home-relative path to a clearly missing target is still flagged."""
+        nonexistent_home = "~/misfire_nonexistent_home_dir_xyz_12345678"
+        config_root = _make_config(
+            tmp_path,
+            f"- Data lives at `{nonexistent_home}`\n",
+        )
+        pr = parse_config(config_root)
+        findings = audit_stale_paths(pr)
+        stale = _findings_of_kind(findings, KIND_STALE_PATH)
+        assert any(
+            "misfire_nonexistent_home_dir_xyz" in f.detail.get("token", "")
+            for f in stale
+        ), (
+            f"Missing home-relative path {nonexistent_home!r} must still be flagged"
+        )
