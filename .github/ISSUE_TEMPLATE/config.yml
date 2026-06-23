@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & ideas (Discussions)
+    url: https://github.com/ek33450505/misfire/discussions
+    about: Ask how to use misfire, share a config, or float an idea before filing a feature request.
+  - name: Security vulnerability (private)
+    url: https://github.com/ek33450505/misfire/security/advisories/new
+    about: Report a security issue privately — do not open a public issue.

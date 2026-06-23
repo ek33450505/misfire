@@ -1,0 +1,44 @@
+name: Feature request
+description: Suggest a capability, a new convertible rule kind, or an adapter.
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        misfire stays inside a few firm boundaries: a **deterministic, zero-LLM core**; an **observer/recommender** posture (it never auto-deletes a rule, never auto-applies a change, never writes `settings.json`); and **honest framing** (no phantom adherence stats). Proposals that respect those constraints are the easiest to accept. See [`docs/framing.md`](../../docs/framing.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't you do today, and on what kind of config / run history?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should misfire do? If it's a new convertible rule kind, what's the machine-checkable predicate?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - parse / classify (rule extraction + taxonomy)
+        - audit (static findings)
+        - evidence / rank (the violation engine)
+        - convert / scaffold (hook generation)
+        - adapters (transcript / cast.db)
+        - docs
+        - other
+    validations:
+      required: true
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Fits the constraints
+      options:
+        - label: This keeps the core deterministic and zero-LLM (any LLM use is opt-in only).
+        - label: This keeps misfire an observer — it does not auto-delete, auto-apply, or write settings.json.
