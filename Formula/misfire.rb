@@ -3,8 +3,8 @@ class Misfire < Formula
 
   desc "Trace-grounded CLAUDE.md adherence auditor: which prose rules your agents ignore"
   homepage "https://github.com/ek33450505/misfire"
-  url "https://files.pythonhosted.org/packages/88/a8/a5d6cc4b5eb0e26ef28eb5b5d453d4fa9ba545dd8f0a7cd38d01f7daa047/misfire-0.1.0.tar.gz"
-  sha256 "cfb2267466a2e56bf3aace00fc10ff9ce63df8f153da2ce3f838badbfe786b38"
+  url "https://files.pythonhosted.org/packages/42/e5/7fd68aea9a13ddcfa871363f3070f7f4d72e7b6486ae03296f3eba416c68/misfire-0.2.0.tar.gz"
+  sha256 "276ea1c6b4db25965ec6025c61ae5eb98ecfe151a076924de869d8c16a1ce4c6"
   license "Apache-2.0"
 
   depends_on "python@3.12"
