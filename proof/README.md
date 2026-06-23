@@ -111,6 +111,7 @@ reconstructs output-shape (Handoff / Status) rule violations honestly.
 From the repo root, first (re)build the synthetic DB from the committed SQL, then run:
 
 ```sh
+rm -f proof/castdb-sample/generated.db   # idempotent rebuild — seed.sql is not re-runnable over an existing DB
 python3 -c "import sqlite3; c=sqlite3.connect('proof/castdb-sample/generated.db'); \
     c.executescript(open('proof/castdb-sample/seed.sql').read()); c.commit(); c.close()"
 misfire rank proof/castdb-sample/config \
