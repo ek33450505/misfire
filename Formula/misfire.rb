@@ -3,14 +3,8 @@ class Misfire < Formula
 
   desc "Trace-grounded CLAUDE.md adherence auditor: which prose rules your agents ignore"
   homepage "https://github.com/ek33450505/misfire"
-  # TODO(release): fill url + sha256 from the PUBLISHED PyPI sdist after `uv publish`.
-  #   url    — the sdist link from https://pypi.org/pypi/misfire/0.1.0/json
-  #            (urls[] entry whose packagetype == "sdist", field "url")
-  #   sha256 — that entry's digests.sha256, OR locally:
-  #            shasum -a 256 dist/misfire-0.1.0.tar.gz   (valid only if the exact
-  #            locally-built artifact is the one published)
-  url "https://files.pythonhosted.org/packages/source/m/misfire/misfire-0.1.0.tar.gz"
-  sha256 "REPLACE_WITH_PUBLISHED_SDIST_SHA256"
+  url "https://files.pythonhosted.org/packages/88/a8/a5d6cc4b5eb0e26ef28eb5b5d453d4fa9ba545dd8f0a7cd38d01f7daa047/misfire-0.1.0.tar.gz"
+  sha256 "cfb2267466a2e56bf3aace00fc10ff9ce63df8f153da2ce3f838badbfe786b38"
   license "Apache-2.0"
 
   depends_on "python@3.12"
