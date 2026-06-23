@@ -8,7 +8,7 @@ Covered:
 - ``misfire audit`` exits 0 and emits expected output sections (text + JSON)
 - ``misfire rank`` exits 0, emits expected output sections (text + JSON), no PII
 - ``misfire evidence`` exits 0, emits violation listing, no PII
-- ``misfire convert`` remains a stub that exits 2
+- ``misfire convert`` is covered in ``tests/test_cli_convert.py``
 - An unknown subcommand causes argparse to exit 2
 - No subcommand prints help and exits 0
 """
@@ -396,19 +396,8 @@ def test_evidence_limit_flag(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# convert — Phase 3 stub exits 2
+# convert — Phase 3; full coverage in tests/test_cli_convert.py
 # ---------------------------------------------------------------------------
-
-
-def test_convert_stub_exit_code() -> None:
-    assert main(["convert"]) == 2
-
-
-def test_convert_stub_stderr_message(capsys: pytest.CaptureFixture[str]) -> None:
-    main(["convert"])
-    err = capsys.readouterr().err
-    assert "convert" in err
-    assert "not yet implemented" in err
 
 
 # ---------------------------------------------------------------------------

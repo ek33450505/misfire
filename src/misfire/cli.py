@@ -57,31 +57,28 @@ from misfire.classify import (
     CATEGORY_CONVERTIBLE,
     Classification,
     CONVERT_NEVER_COMMAND,
+    CONVERT_TOOL_SUBSTITUTION,
     classify_rules,
 )
 from misfire.evidence import ToolAction
 from misfire.match import find_violations, RuleViolation
 from misfire.parse import ParseResult, Rule, SourceFile, _collapse_home, parse_config
 from misfire.rank import (
+    RECOMMENDATION_ENFORCE_CANDIDATE,
+    RECOMMENDATION_INSUFFICIENT_EVIDENCE,
+    RECOMMENDATION_OBSERVED_NO_VIOLATIONS,
     rank_rules,
     RankReport,
     RankedRule,
 )
-
-
-# ---------------------------------------------------------------------------
-# Stub for Phase 3 command
-# ---------------------------------------------------------------------------
-
-
-def _stub(cmd: str, phase: int) -> int:
-    """Print a not-yet-implemented notice to stderr and return exit code 2."""
-    print(f"{cmd}: not yet implemented (Phase {phase})", file=sys.stderr)
-    return 2
-
-
-def _cmd_convert(_args: argparse.Namespace) -> int:
-    return _stub("convert", 3)
+from misfire.scaffold import (
+    HookScaffold,
+    RUNG_ENFORCE,
+    RUNG_KEEP,
+    detect_claude_version,
+    event_support_note,
+    scaffold_hook,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -409,10 +406,11 @@ def _extract_exceptions(
     classifications: List[Classification],
     rules_by_id: Dict[str, Rule],
 ) -> Dict[str, str]:
-    """Extract escape-hatch exception markers from never_command rule raw texts.
+    """Extract escape-hatch exception markers from convertible rule raw texts.
 
-    Scans the ``raw_text`` (backtick-aware) of each ``never_command``
-    convertible rule for a clearly-stated escape hatch that names a literal
+    Scans the ``raw_text`` (backtick-aware) of each ``never_command`` or
+    ``tool_substitution`` convertible rule for a clearly-stated escape hatch
+    that names a literal
     marker in backticks.  The extracted marker is refined to its most
     distinctive token (FIX A: env-var token preferred over the full span so
     that ``export VAR=1 && git commit`` variants are also caught).
@@ -433,11 +431,17 @@ def _extract_exceptions(
     predicate_match_for: Dict[str, str] = {}  # rule_id → predicate["match"]
 
     for cl in classifications:
-        if cl.category != CATEGORY_CONVERTIBLE or cl.convert_kind != CONVERT_NEVER_COMMAND:
+        if cl.category != CATEGORY_CONVERTIBLE or cl.convert_kind not in (
+            CONVERT_NEVER_COMMAND,
+            CONVERT_TOOL_SUBSTITUTION,
+        ):
             continue
         if cl.predicate is None:
             continue
-        pred_match = cl.predicate.get("match", "")
+        # never_command predicates carry "match"; tool_substitution carry "forbidden".
+        # Honoring the hatch for both keeps violation accounting AND the generated
+        # hook from penalizing usage the rule itself sanctions.
+        pred_match = cl.predicate.get("match") or cl.predicate.get("forbidden", "")
         predicate_match_for[cl.rule_id] = pred_match
 
         rule = rules_by_id.get(cl.rule_id)
@@ -1071,6 +1075,337 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# convert (Phase 3) — the evidence-ranked convert-to-hook wedge
+# ---------------------------------------------------------------------------
+
+_CONVERT_DISCLAIMER = (
+    "misfire is an observer: this scaffold is printed for you to review — "
+    "misfire never writes settings.json. A converted rule should usually stay "
+    "in prose too (defense in depth). Only rules with BOTH sufficient support "
+    "AND observed violations are evidence-grounded conversion candidates."
+)
+
+_EVIDENCE_STATUS_NOT_COMPUTED = "not_computed"
+
+_STATUS_KEEP = "keep"
+_STATUS_ENFORCE = "enforce"
+_STATUS_NOTHING = "nothing_to_convert"
+
+
+# Leading markdown marker (bullet / numbered / heading / blockquote) to strip
+# from a faithful excerpt.
+_LEADING_MARKER_RE = re.compile(r"^\s*(?:[-*+]|\d+\.|#{1,6}|>)\s*")
+
+
+def _faithful_excerpt(raw_text: str, limit: int = 100) -> str:
+    """Faithful, sanitized, truncated rule text for display + the deny reason.
+
+    Sourced from ``Rule.raw_text`` (NOT ``normalized_text``) so identifiers like
+    ``CAST_COMMIT_AGENT=1`` survive intact — the deny reason a blocked user reads
+    must quote the rule and its escape hatch correctly.  (``normalized_text``'s
+    markdown italic-strip eats the underscores in snake_case, turning
+    ``CAST_COMMIT_AGENT`` into ``CASTCOMMITAGENT`` — wrong remediation in the one
+    place it matters.)  Strips a leading markdown marker and backticks, collapses
+    whitespace, and removes any home path (no ``/Users/<name>/`` leak).
+    """
+    text = _LEADING_MARKER_RE.sub("", raw_text)
+    text = text.replace("`", "")
+    text = _sanitize_command_str(text)
+    text = " ".join(text.split())
+    if len(text) > limit:
+        return text[: limit - 1] + "…"
+    return text
+
+
+def _is_recommended(rr: Optional[RankedRule]) -> bool:
+    """A conversion is *recommended* only when it is an evidence-grounded
+    enforce_candidate (sufficient support AND observed violations)."""
+    return rr is not None and rr.recommendation == RECOMMENDATION_ENFORCE_CANDIDATE
+
+
+def _evidence_summary(rr: Optional[RankedRule]) -> Dict:
+    """Serialize the evidence status for a target rule (``not_computed`` if none)."""
+    if rr is None:
+        return {
+            "status": _EVIDENCE_STATUS_NOT_COMPUTED,
+            "violation_count": None,
+            "opportunity_count": None,
+            "violation_rate": None,
+        }
+    return {
+        "status": rr.recommendation,
+        "violation_count": rr.violation_count,
+        "opportunity_count": rr.opportunity_count,
+        "violation_rate": rr.violation_rate,
+    }
+
+
+def _convert_honesty_note(sc: HookScaffold, rr: Optional[RankedRule]) -> str:
+    """The honesty line tying the verdict to (the absence of) evidence."""
+    if sc.rung == RUNG_KEEP:
+        return sc.reason
+    if sc.is_skeleton:
+        return (
+            "before_action / after_action rules carry NO violation evidence "
+            "(ordering is not reconstructible) — UNRANKED. Skeleton shown for "
+            "you to complete; not an evidence-grounded recommendation."
+        )
+    if rr is None:
+        return (
+            "Evidence not computed for this rule (no matching opportunities in "
+            "the scanned run history). Scaffold shown for reference only."
+        )
+    if rr.recommendation == RECOMMENDATION_ENFORCE_CANDIDATE:
+        return (
+            f"Evidence-grounded: {rr.violation_count} observed violation(s) across "
+            f"{rr.opportunity_count} opportunities "
+            f"({rr.violation_rate * 100:.1f}%)."
+        )
+    if rr.recommendation == RECOMMENDATION_OBSERVED_NO_VIOLATIONS:
+        return (
+            "0 observed violations — NOT an evidence-grounded conversion (the "
+            "honesty guard: a non-triggered rule is not a conversion signal). "
+            "Consider KEEP; scaffold shown for reference only."
+        )
+    # insufficient_evidence
+    return (
+        f"Below the support floor ({rr.violation_count} violation(s), "
+        f"{rr.opportunity_count} opportunities) — weak evidence; scaffold shown "
+        "for reference only."
+    )
+
+
+def _scaffold_to_hook_dict(sc: HookScaffold) -> Optional[Dict]:
+    """Serialize an ENFORCE scaffold's hook payload (``None`` for KEEP/ELEVATE)."""
+    if sc.rung != RUNG_ENFORCE:
+        return None
+    return {
+        "event": sc.event,
+        "filename": sc.hook_filename,
+        "is_skeleton": sc.is_skeleton,
+        "matcher": sc.matcher,
+        "script": sc.hook_script,
+        "settings_snippet": sc.settings_snippet,
+    }
+
+
+def _convert_result_dict(
+    config_root_raw: str,
+    sc: HookScaffold,
+    rule: Rule,
+    rr: Optional[RankedRule],
+    recommended: bool,
+    note: str,
+) -> Dict:
+    """Build the deterministic result dict for both text and JSON rendering."""
+    status = _STATUS_KEEP if sc.rung == RUNG_KEEP else _STATUS_ENFORCE
+    hook = _scaffold_to_hook_dict(sc)
+    rule_dict = {
+        "convert_kind": sc.convert_kind,
+        "excerpt": _faithful_excerpt(rule.raw_text),
+        "rule_id": rule.rule_id,
+        "rung": sc.rung,
+        "source_rel": rule.source_rel,
+    }
+    return {
+        "caveats": list(sc.caveats),
+        "config_root": _display_config_root(config_root_raw),
+        "disclaimer": _CONVERT_DISCLAIMER,
+        "evidence": _evidence_summary(rr),
+        "hook": hook,
+        "recommended": recommended,
+        "reason": note,
+        "rule": rule_dict,
+        "status": status,
+    }
+
+
+def _nothing_to_convert_result(config_root_raw: str) -> Dict:
+    """Result dict for the honest 'no enforce_candidate' outcome."""
+    return {
+        "caveats": [],
+        "config_root": _display_config_root(config_root_raw),
+        "disclaimer": _CONVERT_DISCLAIMER,
+        "evidence": None,
+        "hook": None,
+        "recommended": False,
+        "reason": (
+            "No rule qualifies for conversion: none have both sufficient support "
+            "AND observed violations (the honesty guard). Nothing to convert."
+        ),
+        "rule": None,
+        "status": _STATUS_NOTHING,
+    }
+
+
+def _print_convert_nothing(config_root_display: str) -> None:
+    """Text rendering of the nothing-to-convert outcome."""
+    print(f"misfire convert — {config_root_display}")
+    print()
+    print("Nothing to convert.")
+    print(
+        "No rule qualifies: none have both sufficient support AND observed "
+        "violations\n(the honesty guard). Run `misfire rank` to see the evidence."
+    )
+    print()
+    print(_CONVERT_DISCLAIMER)
+
+
+def _print_convert_text(result: Dict, config_root_display: str) -> None:
+    """Human-readable rendering of a convert result (KEEP or ENFORCE)."""
+    rule = result["rule"]
+    print(f"misfire convert — {config_root_display}")
+    kind = rule["convert_kind"] or "n/a"
+    print(f"Rule: {rule['rule_id']}  [{kind}]  ({rule['source_rel']})")
+    print(f"\"{rule['excerpt']}\"")
+    print()
+
+    ev = result["evidence"]
+    if ev and ev["status"] != _EVIDENCE_STATUS_NOT_COMPUTED:
+        rate = ev["violation_rate"]
+        rate_pct = f"{rate * 100:.1f}%" if rate is not None else "n/a"
+        print(
+            f"Evidence: {ev['status']}  "
+            f"violations={ev['violation_count']}  "
+            f"opportunities={ev['opportunity_count']}  rate={rate_pct}"
+        )
+
+    print(
+        f"Verdict: {result['status'].upper()}  "
+        f"recommended={str(result['recommended']).lower()}"
+    )
+    print(result["reason"])
+    print()
+
+    hook = result["hook"]
+    if hook is not None:
+        skeleton = "  [SKELETON — complete the TODO before installing]" if hook["is_skeleton"] else ""
+        print(f"=== ENFORCE: {hook['event']} hook (matcher: {hook['matcher']}){skeleton} ===")
+        print()
+        print(f"--- save as: .claude/hooks/{hook['filename']} (chmod +x) ---")
+        print(hook["script"])
+        print("--- settings.json (merge this; misfire does NOT write it) ---")
+        print(json.dumps(hook["settings_snippet"], indent=2, sort_keys=True))
+        print()
+
+    if result["caveats"]:
+        print("Caveats:")
+        for c in result["caveats"]:
+            print(f"  - {c}")
+        print()
+
+    print(result["disclaimer"])
+
+
+def _cmd_convert(args: argparse.Namespace) -> int:
+    """Implement ``misfire convert``.
+
+    Two modes:
+    - ``--rule RULE_ID`` — target a specific rule (by id prefix).  Non-convertible
+      rules return a KEEP verdict with NO hook (the honesty guard for safety /
+      judgment / output-shape / non-directive rules).  A convertible rule with
+      zero observed violations is shown for reference only (``recommended=false``).
+    - default / ``--top`` — convert the top evidence-grounded enforce_candidate.
+      If none qualifies, prints an honest "nothing to convert" and exits 0.
+
+    Observer posture: always exits 0 on a resolved target (1 only when an
+    explicit ``--rule`` prefix matches nothing).  Never writes settings.json.
+    All output is PII-free (sanitized at the output boundary).
+    """
+    config_root_raw: str = args.config_root if args.config_root is not None else "~/.claude"
+    config_root: Path = (
+        Path(args.config_root).expanduser().resolve()
+        if args.config_root is not None
+        else Path.home() / ".claude"
+    )
+    projects_dir: Path = (
+        Path(args.projects_dir).expanduser().resolve()
+        if args.projects_dir
+        else Path.home() / ".claude" / "projects"
+    )
+    config_root_display = _display_config_root(config_root_raw)
+
+    parse_result = parse_config(config_root)
+    rules = parse_result.rules
+    classifications = classify_rules(rules)
+    rules_by_id: Dict[str, Rule] = {r.rule_id: r for r in rules}
+    classifications_by_id: Dict[str, Classification] = {
+        c.rule_id: c for c in classifications
+    }
+
+    exceptions = _extract_exceptions(classifications, rules_by_id)
+
+    # Evidence grounding (best-effort) — scan run history → rank.
+    actions = iter_tool_actions(projects_dir)
+    rule_violations = find_violations(classifications, actions, exceptions=exceptions)
+    report = rank_rules(
+        rule_violations,
+        rules_by_id,
+        min_support=args.min_support,
+        min_violations=args.min_violations,
+    )
+    ranked_by_id: Dict[str, RankedRule] = {rr.rule_id: rr for rr in report.ranked}
+
+    # ------------------------------------------------------------------
+    # Resolve the target rule
+    # ------------------------------------------------------------------
+    if args.rule:
+        target_rule: Optional[Rule] = next(
+            (r for r in rules if r.rule_id.startswith(args.rule)), None
+        )
+        if target_rule is None:
+            print(
+                f"convert: no rule found with id prefix {args.rule!r}",
+                file=sys.stderr,
+            )
+            return 1
+        target_cl = classifications_by_id[target_rule.rule_id]
+    else:
+        # default / --top: the top evidence-grounded enforce_candidate
+        top = next(
+            (
+                rr
+                for rr in report.ranked
+                if rr.recommendation == RECOMMENDATION_ENFORCE_CANDIDATE
+            ),
+            None,
+        )
+        if top is None:
+            result = _nothing_to_convert_result(config_root_raw)
+            if args.json:
+                print(json.dumps(result, indent=2, sort_keys=True))
+            else:
+                _print_convert_nothing(config_root_display)
+            return 0
+        target_cl = classifications_by_id[top.rule_id]
+        target_rule = rules_by_id[top.rule_id]
+
+    rr = ranked_by_id.get(target_cl.rule_id)
+    marker = exceptions.get(target_cl.rule_id, "")
+    sc = scaffold_hook(target_cl, _faithful_excerpt(target_rule.raw_text), marker)
+    recommended = _is_recommended(rr)
+    note = _convert_honesty_note(sc, rr)
+    result = _convert_result_dict(
+        config_root_raw, sc, target_rule, rr, recommended, note
+    )
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        _print_convert_text(result, config_root_display)
+        # Version advisory: STDERR only, text mode only → keeps --json deterministic.
+        if sc.rung == RUNG_ENFORCE:
+            version = detect_claude_version()
+            if version:
+                print(f"\nClaude Code detected: {version}", file=sys.stderr)
+            vnote = event_support_note(sc.event, version)
+            if vnote:
+                print(vnote, file=sys.stderr)
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # audit command dispatcher
 # ---------------------------------------------------------------------------
 
@@ -1306,13 +1641,63 @@ def build_parser() -> argparse.ArgumentParser:
         help="output deterministic JSON (byte-stable; sort_keys=True)",
     )
 
-    # --- convert (Phase 3 stub) ---
-    subparsers.add_parser(
+    # --- convert (Phase 3) ---
+    convert_parser = subparsers.add_parser(
         "convert",
         help=(
             "[Phase 3] Scaffold a deterministic hook for a violated convertible "
-            "rule; print the diff for review"
+            "rule; print the hook + settings snippet for review (never written)"
         ),
+    )
+    convert_parser.add_argument(
+        "config_root",
+        nargs="?",
+        default=None,
+        metavar="CONFIG_ROOT",
+        help="config root directory (default: ~/.claude)",
+    )
+    convert_parser.add_argument(
+        "--rule",
+        dest="rule",
+        metavar="RULE_ID",
+        default=None,
+        help="rule_id prefix to convert (default: the top evidence-grounded candidate)",
+    )
+    convert_parser.add_argument(
+        "--top",
+        dest="top",
+        action="store_true",
+        default=False,
+        help="convert the top enforce_candidate from rank (the default when no --rule)",
+    )
+    convert_parser.add_argument(
+        "--projects-dir",
+        dest="projects_dir",
+        metavar="DIR",
+        default=None,
+        help="Claude Code projects directory for evidence (default: ~/.claude/projects)",
+    )
+    convert_parser.add_argument(
+        "--min-support",
+        dest="min_support",
+        type=int,
+        default=30,
+        metavar="N",
+        help="minimum opportunity count for trusted ranking (default: 30)",
+    )
+    convert_parser.add_argument(
+        "--min-violations",
+        dest="min_violations",
+        type=int,
+        default=1,
+        metavar="N",
+        help="minimum violation count to recommend enforcement (default: 1)",
+    )
+    convert_parser.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="output deterministic JSON (byte-stable; sort_keys=True)",
     )
 
     return parser
