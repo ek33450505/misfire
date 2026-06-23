@@ -39,8 +39,8 @@
         "signal": "status"
       },
       "recommendation": "enforce_candidate",
-      "rule_excerpt": "MANDATORY: All agents end with Status: DONE | DONEWITHCONCERNS | BLOCKED | NEEDS_CONTEXT.",
-      "rule_id": "8629c4348d4e",
+      "rule_excerpt": "MANDATORY: All agents end with Status: DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT.",
+      "rule_id": "fbdad9c60ed6",
       "source_rel": "CLAUDE.md",
       "violation_count": 2,
       "violation_rate": 0.05

@@ -372,6 +372,24 @@ class TestMarkdownNormalization:
         assert "Always" in norm
         assert has_imperative(norm) is True
 
+    def test_snake_case_identifier_underscores_preserved(self) -> None:
+        """Regression: intraword underscores are NOT italic-stripped.
+
+        The italic rule must only fire at word boundaries, so snake_case
+        identifiers survive intact (was: CAST_COMMIT_AGENT → CASTCOMMITAGENT,
+        which mis-quoted the escape hatch in generated convert hooks).
+        """
+        norm = normalize_markdown("escape hatch: CAST_COMMIT_AGENT=1 git commit")
+        assert "CAST_COMMIT_AGENT=1" in norm
+        norm2 = normalize_markdown("Status: DONE_WITH_CONCERNS or NEEDS_CONTEXT")
+        assert "DONE_WITH_CONCERNS" in norm2
+        assert "NEEDS_CONTEXT" in norm2
+
+    def test_word_boundary_underscore_emphasis_still_stripped(self) -> None:
+        """Genuine ``_emphasis_`` at word boundaries is still stripped."""
+        assert normalize_markdown("use _this_ approach") == "use this approach"
+        assert normalize_markdown("_italic_") == "italic"
+
     def test_link_stripping(self) -> None:
         norm = normalize_markdown("Use [this tool](https://example.com) not that one")
         assert "[" not in norm
