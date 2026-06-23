@@ -9,4 +9,4 @@ Observer / recommender only: never auto-deletes, never auto-applies,
 never writes settings.json.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
