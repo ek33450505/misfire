@@ -226,6 +226,36 @@ post. They are non-negotiable for honest framing.
    `.claude/rules/*.md`, `@imports`). It does not audit AGENTS.md (Cursor) or
    `.cursorrules` in v1; portability to other platforms is a later phase.
 
+7. **Ablation is a proxy measurement, not an authoritative verdict:** The local Ollama
+   model used in `misfire ablate` is a stand-in, not your production agent. Behavior
+   differences between a generic local model and your deployed Claude model are expected
+   and significant. Treat ablation results as suggestive signal, not ground truth.
+
+8. **Small-N / temperature variance:** Ablation runs N trials per condition (default 5)
+   at a fixed temperature (default 0.7). With small N, results may not be statistically
+   robust. A single ablation run is a directional probe, not a measurement.
+
+9. **Non-shift is never a deletion recommendation:** A zero or negative shift (ablated
+   violation rate ≤ present rate) does NOT mean the rule is safe to delete. The rule may
+   be obeyed in both conditions, redundant, or simply untestable with the given
+   task/model — the omniscient-auditor trap applies here too. `misfire ablate` never
+   recommends deletion.
+
+10. **Ablation coverage is limited to convertible rules:** Only rules with `convert_kind`
+    in `{never_command, tool_substitution}` can be probed. Safety, judgment, output-shape,
+    and non-directive rules are outside scope.
+
+11. **Ablation is opt-in and off the default deterministic path:** `misfire ablate`
+    requires an explicit invocation and a running Ollama instance. The deterministic core
+    (`audit`, `rank`, `evidence`, `convert`) never calls a live model. CI test suites
+    should never call `misfire ablate` against a live Ollama — tests use the injectable
+    `ChatClient` stub instead.
+
+12. **Absolute ablation rates are not real-world base rates:** The representative task is
+    deliberately constructed to *elicit* the candidate violation, so the present/ablated
+    violation rates are inflated by design and must not be read as adherence estimates.
+    Only the **shift** between the two conditions is the measured signal.
+
 ---
 
 ## Enforcement
