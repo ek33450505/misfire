@@ -1,0 +1,14 @@
+{
+  "name": "misfire",
+  "owner": { "name": "Edward Kubiak", "url": "https://github.com/ek33450505" },
+  "description": "misfire — a local, deterministic, zero-LLM auditor that ranks which of your existing CLAUDE.md rules your agents actually ignore and converts only those into hooks.",
+  "plugins": [
+    {
+      "name": "misfire",
+      "source": "./",
+      "description": "Trace-grounded CLAUDE.md adherence: rank the prose rules your agents demonstrably ignore from your run history, then scaffold a deterministic hook for the violated convertible subset. Observer-only; keeps safety rules as prose; never writes settings.json.",
+      "license": "Apache-2.0",
+      "keywords": ["claude-code", "claude-md", "adherence", "hooks", "audit"]
+    }
+  ]
+}

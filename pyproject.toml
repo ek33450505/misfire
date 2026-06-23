@@ -4,12 +4,38 @@ build-backend = "hatchling.build"
 
 [project]
 name = "misfire"
-version = "0.0.0"
+version = "0.1.0"
 description = "Trace-grounded CLAUDE.md adherence auditor: which prose rules your agents actually ignore, ranked from run history"
 readme = "README.md"
 license = { text = "Apache-2.0" }
+authors = [{ name = "Edward Kubiak", email = "edward.kubiak.dev@gmail.com" }]
 requires-python = ">=3.9"
 dependencies = []
+keywords = [
+    "claude-code",
+    "claude",
+    "claude-md",
+    "agents",
+    "llm",
+    "hooks",
+    "adherence",
+    "audit",
+    "agent-reliability",
+    "deterministic",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Utilities",
+]
 
 # The deterministic core requires NOTHING beyond the stdlib.
 # Optional extras are reserved for future phases (LLM ablation, OTel, etc.).
@@ -17,11 +43,32 @@ dependencies = []
 llm = []    # Phase 4: local-Ollama ablation (opt-in causal probe)
 dev = ["pytest>=8.0"]
 
+[project.urls]
+Homepage = "https://github.com/ek33450505/misfire"
+Repository = "https://github.com/ek33450505/misfire"
+Issues = "https://github.com/ek33450505/misfire/issues"
+Changelog = "https://github.com/ek33450505/misfire/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/ek33450505/misfire/tree/main/docs"
+
 [project.scripts]
 misfire = "misfire.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/misfire"]
+
+# Strict sdist allowlist. Without this, hatchling's VCS integration would ship the
+# WHOLE repo — including docs/ (the framing guardrails), proof/, and tests/.
+# Patterns are root-anchored with a leading "/" because hatchling treats include
+# entries as gitignore-style globs: a bare "README.md" would also match
+# docs/README.md and proof/README.md. Only the importable package and the two
+# metadata files travel in the sdist; pyproject.toml is always included.
+# (hatchling additionally force-ships .gitignore in every sdist — harmless here.)
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/misfire",
+    "/README.md",
+    "/LICENSE",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
