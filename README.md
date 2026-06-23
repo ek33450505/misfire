@@ -65,7 +65,17 @@ ladder:
 ## Install
 
 misfire is **stdlib-only with zero runtime dependencies** and supports Python 3.9+.
-Install from source for now:
+
+```sh
+pip install misfire
+# or, with uv:
+uv pip install misfire
+```
+
+A Homebrew tap is planned — `brew install ek33450505/misfire/misfire` will work once the
+`homebrew-misfire` tap is published.
+
+### From source (for development)
 
 ```sh
 git clone https://github.com/ek33450505/misfire
@@ -74,9 +84,6 @@ pip install -e .
 # or, with uv:
 uv pip install -e .
 ```
-
-The PyPI name is reserved; the first real release will be `>=0.1.0`. `pip install misfire`
-does not work yet — **the PyPI release lands with v0.1.0.** Install from source until then.
 
 ## Quick start — proof in one command
 
