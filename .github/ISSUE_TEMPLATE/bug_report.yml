@@ -1,0 +1,56 @@
+name: Bug report
+description: Something misfire did wrong — a crash, a wrong finding, or an inaccurate ranking.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. misfire is deterministic, so a precise repro almost always pins the cause.
+        Please do **not** paste real `/Users/<you>/...` paths or private rule text you'd rather keep out of a public issue — misfire sanitizes its own output, but issue bodies are public.
+  - type: input
+    id: version
+    attributes:
+      label: misfire version
+      description: Output of `misfire --version`.
+      placeholder: "misfire 0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: command
+    attributes:
+      label: Command
+      description: Which subcommand were you running?
+      options:
+        - audit
+        - rank
+        - evidence
+        - convert
+        - other / not command-specific
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS and Python version (`python3 --version`).
+      placeholder: "macOS 15.5, Python 3.12.3"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact command(s). A repro against a committed `proof/` fixture is ideal.
+      placeholder: |
+        misfire rank proof/evidence-sample/config --projects-dir proof/evidence-sample/projects --json
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+      description: What you expected, and what actually happened (paste output — it's already sanitized).
+    validations:
+      required: true
